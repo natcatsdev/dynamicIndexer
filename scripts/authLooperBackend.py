@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""
-authLooperBackend.py – fills in authParent and dateAvailable for blocks
-that don’t have them.
-"""
+# --------------------------------------------------------------
+# authLooperBackend.py
+# Fills in `authParent` and `dateAvailable` for blocks that lack them.
+# --------------------------------------------------------------
+from __future__ import annotations     # ← enables PEP 604 unions on Py 3.9
+
 # ---- lock-file cleanup -------------------------------------------------
 import os, atexit
 LOCK_FILE = os.getenv("AUTH_LOCK_FILE")
@@ -10,14 +12,9 @@ if LOCK_FILE:
     atexit.register(lambda: os.remove(LOCK_FILE)
                     if os.path.exists(LOCK_FILE) else None)
 
-# ---------- PASTE YOUR ORIGINAL SCRIPT **BELOW** THIS LINE -------------
-
-#!/usr/bin/env python3
-# --------------------------------------------------------------
-# authLooperBackend.py
-# Fills in `authParent` and `dateAvailable` for blocks that lack them.
-# --------------------------------------------------------------
-
+# -----------------------------------------------------------------------
+# Standard libs & deps
+# -----------------------------------------------------------------------
 import json
 import time
 import datetime
@@ -27,9 +24,9 @@ import boto3
 from boto3.dynamodb.conditions import Attr
 from playwright.sync_api import sync_playwright
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 logger = logging.getLogger("authLooperBackend")
 logger.setLevel(logging.DEBUG)
 
@@ -40,17 +37,17 @@ _file    = logging.FileHandler("authLooperBackend.log"); _file.setFormatter(_fmt
 logger.addHandler(_console)
 logger.addHandler(_file)
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # DynamoDB
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 table    = dynamodb.Table("dynamicIndex1")
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 def fetch_block_mined_iso(block_height: int) -> str | None:
-    """Return the block’s mined‑time as an ISO‑8601 UTC string (or None)."""
+    """Return the block’s mined-time as an ISO-8601 UTC string (or None)."""
     try:
         h = requests.get(
             f"https://blockstream.info/api/block-height/{block_height}", timeout=10
@@ -62,7 +59,7 @@ def fetch_block_mined_iso(block_height: int) -> str | None:
             f"https://blockstream.info/api/block/{block_hash}", timeout=10
         )
         info.raise_for_status()
-        ts = info.json().get("timestamp")          # epoch‑seconds
+        ts = info.json().get("timestamp")          # epoch-seconds
         return datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
     except Exception as exc:
         logger.error("Error fetching mined date for block %s: %s", block_height, exc)
@@ -112,9 +109,9 @@ def fetch_al_for_block(block_num: int | str) -> tuple[str, str]:
         logger.error("JSON parse error for block %s: %s", block_num, exc)
         return str(block_num), result_text
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Main loop
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 def main() -> None:
     logger.info("Starting authLooperBackend execution")
 
@@ -154,7 +151,7 @@ def main() -> None:
         except Exception as exc:
             logger.error("Failed to update authParent for block %s: %s", blk, exc)
 
-        # 4) mined‑time for THIS block
+        # 4) mined-time for THIS block
         date_iso = fetch_block_mined_iso(int(blk))
         if date_iso:
             try:
@@ -172,6 +169,6 @@ def main() -> None:
     logger.info("authLooperBackend completed.")
     print(json.dumps({"message": "Processing completed"}))
 
+# -----------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
