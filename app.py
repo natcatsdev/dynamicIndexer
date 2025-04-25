@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.5  (Auth, Index, and Run-Both)
+# DynamicIndexer API – v0.6
+# Supports Auth, Index, Run-Both + Scheduler controls
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json
@@ -16,11 +17,15 @@ TABLE_NAME    = "dynamicIndex1"
 BASE_DIR      = Path(__file__).parent
 AUTH_SCRIPT   = BASE_DIR / "scripts" / "authLooperBackend.py"
 INDEX_SCRIPT  = BASE_DIR / "scripts" / "indexLooper.py"
-BOTH_SCRIPT   = BASE_DIR / "scripts" / "run_both.py"        # NEW
+BOTH_SCRIPT   = BASE_DIR / "scripts" / "run_both.py"
 
 AUTH_LOCK     = "/tmp/authscript.lock"
 INDEX_LOCK    = "/tmp/indexscript.lock"
-BOTH_LOCK     = "/tmp/runboth.lock"                         # NEW
+BOTH_LOCK     = "/tmp/runboth.lock"
+
+TIMER_UNIT    = "runboth.timer"
+CADENCE_DIR   = f"/etc/systemd/system/{TIMER_UNIT}.d"
+CADENCE_FILE  = f"{CADENCE_DIR}/override.conf"
 
 # ───────────── Flask / CORS ──────────
 app = Flask(__name__)
@@ -32,7 +37,7 @@ table = boto3.resource("dynamodb", region_name=DYNAMO_REGION) \
 
 # ───────────── helpers ───────────────
 def _running(lock_path: str) -> bool:
-    """Return True iff the PID stored in lock_path is a live, non-zombie process."""
+    """Check if lockfile points to a live (non-zombie) PID."""
     p = Path(lock_path)
     if not p.exists():
         return False
@@ -41,18 +46,17 @@ def _running(lock_path: str) -> bool:
         proc_dir = Path(f"/proc/{pid}")
         if not proc_dir.exists():
             raise RuntimeError
-        if "\nState:\tZ" in (proc_dir / "status").read_text():  # zombie
+        if "\nState:\tZ" in (proc_dir / "status").read_text():
             raise RuntimeError
         return True
     except Exception:
-        p.unlink(missing_ok=True)          # clean stale lock
+        p.unlink(missing_ok=True)
         return False
 
 def _spawn(script: Path, lock_path: str, env_var: str):
-    """Launch script in background, write PID to lock-file, or 409 if busy."""
+    """Launch script in background if not already running."""
     if _running(lock_path):
         return jsonify({"status": "busy"}), 409
-
     proc = subprocess.Popen(
         [sys.executable, str(script)],
         env={**os.environ, env_var: lock_path},
@@ -81,11 +85,49 @@ def run_auth():
 def run_index():
     return _spawn(INDEX_SCRIPT, INDEX_LOCK, "INDEX_LOCK_FILE")
 
-# ---------- NEW: wrapper that runs Auth then Inscription ----------
 @app.post("/api/run-both")
 def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
-# ───────────── local dev ─────────────
+# ───────────── scheduler endpoints ─────────────
+@app.get("/api/schedule/status")
+def schedule_status():
+    out = subprocess.run(["systemctl", "is-active", TIMER_UNIT], capture_output=True, text=True).stdout.strip()
+    return {"enabled": out == "active"}
+
+@app.get("/api/schedule/cadence")
+def schedule_get_cadence():
+    out = subprocess.run(
+        ["systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
+        capture_output=True, text=True
+    ).stdout.strip()
+    secs = int(out.rstrip("s") or "0")
+    return {"seconds": secs}
+
+@app.post("/api/schedule/cadence")
+def schedule_set_cadence():
+    data = request.get_json(force=True) or {}
+    seconds = int(data.get("seconds", 0))
+    if not 10 <= seconds <= 86400:
+        return {"error": "Seconds must be 10–86400"}, 400
+
+    os.makedirs(CADENCE_DIR, exist_ok=True)
+    Path(CADENCE_FILE).write_text(f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
+
+    subprocess.run(["systemctl", "daemon-reload"])
+    subprocess.run(["systemctl", "restart", TIMER_UNIT])
+    return {"seconds": seconds}
+
+@app.post("/api/schedule/enable")
+def schedule_enable():
+    subprocess.run(["systemctl", "start", TIMER_UNIT])
+    return {"enabled": True}
+
+@app.post("/api/schedule/disable")
+def schedule_disable():
+    subprocess.run(["systemctl", "stop", TIMER_UNIT])
+    return {"enabled": False}
+
+# ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
