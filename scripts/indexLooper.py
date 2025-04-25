@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-from __future__ import annotations           # <- PEP-604 unions on Py 3.9
+from __future__ import annotations           # PEP-604 unions on Py 3.9
 # --------------------------------------------------------------
-# indexLooper.py – fills inscriptionID / inscriptionTimestamp /
+# indexLooper.py – fill inscriptionID / inscriptionTimestamp /
 # inscriptionNumber for rows that already have authParent
 # --------------------------------------------------------------
 
 # ---- lock-file cleanup ---------------------------------------
-import os, atexit
-LOCK_FILE = os.getenv("INDEX_LOCK_FILE")      # set by app.py
-if LOCK_FILE:
-    atexit.register(lambda: os.remove(LOCK_FILE)
-                    if os.path.exists(LOCK_FILE) else None)
-
-# ---- standard libs & deps -----------------------------------
-import json, time, datetime, logging, requests, boto3
+import os, atexit, json, time, datetime, logging, boto3, requests
+from pathlib import Path
 from boto3.dynamodb.conditions import Attr
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+LOCK_FILE = os.getenv("INDEX_LOCK_FILE")      # set by app.py at launch
+if LOCK_FILE:
+    atexit.register(lambda: Path(LOCK_FILE).unlink(missing_ok=True))
 
 ENABLE_DATE_FETCH = True
 HIRO_API_BASE     = "https://api.hiro.so/ordinals/v1/inscriptions"
@@ -31,18 +29,18 @@ for h in (logging.StreamHandler(),
     h.setFormatter(_fmt); log.addHandler(h)
 
 # ─────────────────────── DynamoDB ─────────────────────────────
-table = boto3.resource("dynamodb", region_name="us-east-1")\
+table = boto3.resource("dynamodb", region_name="us-east-1") \
              .Table("dynamicIndex1")
 
 # ───────────── ordinals.com fallback widget ──────────────────
 def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
     """
-    Uses ordinals.com hidden “IL” widget to find the minted-inscription
-    that corresponds to `block_num`.
-    Returns (block_number, inscription_id | error_flag)
+    Call the hidden “IL” widget to map a block to its minted inscription.
+    Returns (block_str, inscription_id | error_flag)
     """
     url = ("https://ordinals.com/inscription/"
            "66475024139f5a7500b48ac688a7418fdf5838a7eabbc7e6792b7dc7829c8ef7i0")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
@@ -79,9 +77,8 @@ def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
         out = out[1:-1]
 
     try:
-        data = json.loads(out)
-        return (str(data.get("block", block_num)),
-                str(data.get("mintedInscription", "error")))
+        j = json.loads(out)       # sometimes returns proper JSON
+        return str(j.get("block", block_num)), str(j.get("mintedInscription"))
     except Exception:
         return str(block_num), out
 
@@ -93,9 +90,8 @@ def fetch_ts_and_number(insc_id: str) -> tuple[int | None, int | None]:
         j   = r.json()
         ts  = j.get("timestamp")
         num = j.get("number")
-        ts  = ts // 1000 if isinstance(ts, int) else None
-        num = int(num)   if isinstance(num, int) else None
-        return ts, num
+        return (ts // 1000 if isinstance(ts, int) else None,
+                int(num) if isinstance(num, int) else None)
     except Exception as exc:
         log.error("Hiro API error for %s: %s", insc_id, exc)
         return None, None
@@ -127,6 +123,19 @@ def main() -> None:
         # -------- resolve inscriptionID --------
         _, insc_id = fetch_il_for_block(int(blk))
 
+        # Guard: skip obviously invalid results
+        if not insc_id or insc_id.lower() in {"none","error","timeout"} \
+           or insc_id.startswith(("NO_", "PAGE_", "UI_", "TIMEOUT")):
+            log.warning("block %s gave invalid inscriptionID: %s", blk, insc_id)
+            table.update_item(
+                Key={"block_number": int(blk)},
+                UpdateExpression="SET lastProcessedAt=:t",
+                ExpressionAttributeValues={":t": datetime.datetime.utcnow().isoformat()+"Z"},
+            )
+            time.sleep(1)
+            continue
+
+        # Valid ID → write to Dynamo
         now = datetime.datetime.utcnow().isoformat() + "Z"
         table.update_item(
             Key={"block_number": int(blk)},
@@ -135,7 +144,7 @@ def main() -> None:
         )
 
         # -------- optional Hiro enrichment -----
-        if ENABLE_DATE_FETCH and not insc_id.startswith("NO_"):
+        if ENABLE_DATE_FETCH:
             ts, num = fetch_ts_and_number(insc_id)
             expr, vals = [], {}
             if ts is not None:
@@ -149,7 +158,7 @@ def main() -> None:
                     ExpressionAttributeValues=vals,
                 )
 
-        time.sleep(1)      # polite delay
+        time.sleep(1)  # polite delay to external services
 
     log.info("indexLooper done")
 
