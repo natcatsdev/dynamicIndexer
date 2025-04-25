@@ -1,0 +1,9 @@
+[Unit]
+Description=Run both scripts (auth ⇒ inscription)
+
+[Service]
+Type=oneshot
+User=ec2-user
+WorkingDirectory=/home/ec2-user/dynamicIndexer
+Environment="PATH=/home/ec2-user/dynamicIndexer/.venv/bin"
+ExecStart=/home/ec2-user/dynamicIndexer/.venv/bin/python scripts/run_both.py
