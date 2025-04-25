@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-BlockWatcher v1.2  – one-shot
-• Fetches each new block since last_height.txt
-• Inserts DynamoDB row when bits hex contains MATCH_SUBSTRING
-• Always records the latest height
-• Exits after one pass (systemd oneshot service)
+BlockWatcher v1.3 – ONE-SHOT
+• Reads last processed height from scripts/state/last_height.txt
+• Fetches every new block since then (via blockstream.info)
+• Inserts a DynamoDB row when block.bits hex contains MATCH_SUBSTRING
+• ALWAYS records the latest height
+• Exits after one pass (for systemd oneshot service)
 """
 
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
+from decimal import Decimal
 import requests, boto3, logging, sys
 
 # ────────── CONFIG ──────────
 REGION           = "us-east-1"
 TABLE_NAME       = "dynamicIndex1"
-MATCH_SUBSTRING  = "8b".lower()
+MATCH_SUBSTRING  = "8b".lower()          # rule
 STATE_FILE       = Path(__file__).parent / "state" / "last_height.txt"
 API_TIP_HEIGHT   = "https://blockstream.info/api/blocks/tip/height"
 API_BLOCK_HASH   = "https://blockstream.info/api/block-height/{}"   # → hash
 API_BLOCK_JSON   = "https://blockstream.info/api/block/{}"          # needs hash
-TIMEOUT          = 15
+TIMEOUT          = 15                                               # seconds
 
 # ────────── LOGGING ──────────
 logging.basicConfig(
@@ -47,8 +49,8 @@ def matches(bits_int: int) -> bool:
 def put_row(blk: dict):
     table.put_item(
         Item={
-            "block_number":  str(blk["height"]),
-            "bits":          blk["bits"],
+            "block_number":  Decimal(str(blk["height"])),   # numeric PK
+            "bits":          Decimal(str(blk["bits"])),
             "dateAvailable": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -61,8 +63,8 @@ def load_last() -> int:
     STATE_FILE.write_text(str(h))
     return h
 
-def save_last(h: int):
-    STATE_FILE.write_text(str(h))
+def save_last(height: int):
+    STATE_FILE.write_text(str(height))
 
 # ────────── MAIN ─────────────
 def main() -> None:
@@ -77,6 +79,7 @@ def main() -> None:
 
         for h in range(last + 1, tip + 1):
             blk = block_json(h)
+
             if matches(blk["bits"]):
                 put_row(blk)
                 LOG.info("MATCH height=%s bits=0x%x", h, blk["bits"])
