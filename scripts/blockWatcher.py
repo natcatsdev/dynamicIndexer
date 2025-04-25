@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-BlockWatcher v1.1  –  ONE-SHOT version
-• Reads last processed height from scripts/state/last_height.txt
-• Fetches every new block since then (blockstream.info)
-• Inserts a DynamoDB row when the block’s bits (hex) contains MATCH_SUBSTRING
-• ALWAYS records the latest height, even when a block is skipped
-• Exits after a single pass (systemd oneshot unit finishes cleanly)
-
-The systemd timer fires this script every 120 s.
+BlockWatcher v1.2  – one-shot
+• Fetches each new block since last_height.txt
+• Inserts DynamoDB row when bits hex contains MATCH_SUBSTRING
+• Always records the latest height
+• Exits after one pass (systemd oneshot service)
 """
 
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
-import requests, boto3, sys, logging
+import requests, boto3, logging, sys
 
 # ────────── CONFIG ──────────
 REGION           = "us-east-1"
 TABLE_NAME       = "dynamicIndex1"
-MATCH_SUBSTRING  = "8b".lower()      # ← rule: substring in bits (hex)
+MATCH_SUBSTRING  = "8b".lower()
 STATE_FILE       = Path(__file__).parent / "state" / "last_height.txt"
-API_HEIGHT       = "https://blockstream.info/api/blocks/tip/height"
-API_BLOCK_JSON   = "https://blockstream.info/api/block/{}"
-TIMEOUT          = 15               # seconds for HTTP requests
+API_TIP_HEIGHT   = "https://blockstream.info/api/blocks/tip/height"
+API_BLOCK_HASH   = "https://blockstream.info/api/block-height/{}"   # → hash
+API_BLOCK_JSON   = "https://blockstream.info/api/block/{}"          # needs hash
+TIMEOUT          = 15
 
 # ────────── LOGGING ──────────
 logging.basicConfig(
@@ -37,12 +35,13 @@ table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
 # ────────── HELPERS ──────────
 def tip_height() -> int:
-    return int(requests.get(API_HEIGHT, timeout=TIMEOUT).text)
+    return int(requests.get(API_TIP_HEIGHT, timeout=TIMEOUT).text)
 
 def block_json(height: int) -> dict:
-    return requests.get(API_BLOCK_JSON.format(height), timeout=TIMEOUT).json()
+    blk_hash = requests.get(API_BLOCK_HASH.format(height), timeout=TIMEOUT).text
+    return requests.get(API_BLOCK_JSON.format(blk_hash), timeout=TIMEOUT).json()
 
-def row_matches(bits_int: int) -> bool:
+def matches(bits_int: int) -> bool:
     return MATCH_SUBSTRING in format(bits_int, "x")
 
 def put_row(blk: dict):
@@ -57,30 +56,28 @@ def put_row(blk: dict):
 def load_last() -> int:
     if STATE_FILE.exists():
         return int(STATE_FILE.read_text().strip())
-    # first run → start at current tip
     h = tip_height()
     STATE_FILE.parent.mkdir(exist_ok=True)
     STATE_FILE.write_text(str(h))
     return h
 
-def save_last(height: int):
-    STATE_FILE.write_text(str(height))
+def save_last(h: int):
+    STATE_FILE.write_text(str(h))
 
 # ────────── MAIN ─────────────
 def main() -> None:
-    last_height = load_last()
-    LOG.info("start at height %s", last_height)
+    last = load_last()
+    LOG.info("start at %s", last)
 
     try:
         tip = tip_height()
-        if tip <= last_height:
-            LOG.info("chain tip unchanged (%s) → exit", tip)
+        if tip <= last:
+            LOG.info("chain tip unchanged → exit")
             sys.exit(0)
 
-        # process every new block once
-        for h in range(last_height + 1, tip + 1):
+        for h in range(last + 1, tip + 1):
             blk = block_json(h)
-            if row_matches(blk["bits"]):
+            if matches(blk["bits"]):
                 put_row(blk)
                 LOG.info("MATCH height=%s bits=0x%x", h, blk["bits"])
             else:
@@ -93,7 +90,7 @@ def main() -> None:
 
     except Exception as exc:
         LOG.error("ERROR: %s", exc, exc_info=True)
-        sys.exit(1)   # non-zero → systemd records failure
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
