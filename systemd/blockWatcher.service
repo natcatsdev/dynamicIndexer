@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch BTC blocks and insert DynamoDB rows
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/dynamicIndexer
+Environment="PATH=/home/ec2-user/dynamicIndexer/.venv/bin"
+ExecStart=/home/ec2-user/dynamicIndexer/.venv/bin/python scripts/blockWatcher.py
+Restart=on-failure
+RestartSec=5
