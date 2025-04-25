@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.6.3
-# Supports Auth, Index, Run-Both + Scheduler with error reporting
+# DynamicIndexer API – v0.6.4 (absolute /usr/bin/sudo fix)
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json
@@ -26,6 +25,8 @@ BOTH_LOCK     = "/tmp/runboth.lock"
 TIMER_UNIT    = "runboth.timer"
 CADENCE_DIR   = f"/etc/systemd/system/{TIMER_UNIT}.d"
 CADENCE_FILE  = f"{CADENCE_DIR}/override.conf"
+
+SUDO_PATH = "/usr/bin/sudo"   # <<<<<< correct absolute sudo path
 
 # ───────────── Flask / CORS ──────────
 app = Flask(__name__)
@@ -90,7 +91,7 @@ def run_both():
 @app.get("/api/schedule/status")
 def schedule_status():
     try:
-        out = subprocess.run(["sudo", "systemctl", "is-active", TIMER_UNIT],
+        out = subprocess.run([SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
                              capture_output=True, text=True, check=True)
         return {"enabled": out.stdout.strip() == "active"}
     except subprocess.CalledProcessError as e:
@@ -102,7 +103,7 @@ def schedule_status():
 def schedule_get_cadence():
     try:
         out = subprocess.run(
-            ["sudo", "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
+            [SUDO_PATH, "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
             capture_output=True, text=True, check=True
         ).stdout.strip()
         out = out.rstrip("s")
@@ -124,8 +125,8 @@ def schedule_set_cadence():
         Path(CADENCE_FILE).write_text(
             f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
 
-        subprocess.run(["sudo", "systemctl", "daemon-reload"])
-        subprocess.run(["sudo", "systemctl", "restart", TIMER_UNIT])
+        subprocess.run([SUDO_PATH, "systemctl", "daemon-reload"])
+        subprocess.run([SUDO_PATH, "systemctl", "restart", TIMER_UNIT])
         return {"seconds": seconds}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
@@ -133,7 +134,7 @@ def schedule_set_cadence():
 @app.post("/api/schedule/enable")
 def schedule_enable():
     try:
-        subprocess.run(["sudo", "systemctl", "start", TIMER_UNIT])
+        subprocess.run([SUDO_PATH, "systemctl", "start", TIMER_UNIT])
         return {"enabled": True}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
@@ -141,7 +142,7 @@ def schedule_enable():
 @app.post("/api/schedule/disable")
 def schedule_disable():
     try:
-        subprocess.run(["sudo", "systemctl", "stop", TIMER_UNIT])
+        subprocess.run([SUDO_PATH, "systemctl", "stop", TIMER_UNIT])
         return {"enabled": False}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
