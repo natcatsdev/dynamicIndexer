@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – minimal v0.3
+# DynamicIndexer API – minimal v0.4
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess
@@ -9,7 +9,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import boto3
 
-# ---------- constants -------------------------------------------------
+# ───────────── constants ─────────────
 DYNAMO_REGION = "us-east-1"
 TABLE_NAME    = "dynamicIndex1"
 
@@ -20,30 +20,44 @@ INDEX_SCRIPT  = BASE_DIR / "scripts" / "indexLooper.py"
 AUTH_LOCK     = "/tmp/authscript.lock"
 INDEX_LOCK    = "/tmp/indexscript.lock"
 
-# ---------- Flask -----------------------------------------------------
+# ───────────── Flask / CORS ──────────
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# ---------- DynamoDB --------------------------------------------------
+# ───────────── DynamoDB ──────────────
 table = boto3.resource("dynamodb", region_name=DYNAMO_REGION)\
              .Table(TABLE_NAME)
 
-# ---------- helpers ---------------------------------------------------
+# ───────────── helpers ───────────────
 def _running(lock_path: str) -> bool:
-    """Return True if a PID stored in `lock_path` is still alive."""
+    """
+    True  → PID in lock-file is alive and **not** a zombie.
+    False → process gone; stale lock is deleted for next run.
+    """
     p = Path(lock_path)
     if not p.exists():
         return False
     try:
         pid = int(p.read_text())
-        return Path(f"/proc/{pid}").exists()
+        proc_dir = Path(f"/proc/{pid}")
+        if not proc_dir.exists():
+            raise RuntimeError("PID dead")
+
+        # Detect zombie (defunct) state → treat as not running
+        status_txt = (proc_dir / "status").read_text()
+        if "\nState:\tZ" in status_txt:   # zombie
+            raise RuntimeError("PID defunct")
+
+        return True          # process truly running
     except Exception:
+        p.unlink(missing_ok=True)  # auto-clean stale lock
         return False
 
 def _spawn(script: Path, lock_path: str, env_var: str):
     """Launch script in background & write its PID to lock-file."""
     if _running(lock_path):
         return jsonify({"status": "busy"}), 409
+
     proc = subprocess.Popen(
         [sys.executable, str(script)],
         env={**os.environ, env_var: lock_path},
@@ -53,7 +67,7 @@ def _spawn(script: Path, lock_path: str, env_var: str):
     Path(lock_path).write_text(str(proc.pid))
     return jsonify({"status": "started"}), 202
 
-# ---------- routes ----------------------------------------------------
+# ───────────── routes ────────────────
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
@@ -72,6 +86,6 @@ def run_auth():
 def run_index():
     return _spawn(INDEX_SCRIPT, INDEX_LOCK, "INDEX_LOCK_FILE")
 
-# ---------- local dev -------------------------------------------------
+# ───────────── local dev ─────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
