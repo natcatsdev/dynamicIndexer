@@ -2,7 +2,10 @@
 Description=Timer for runboth.service
 
 [Timer]
-OnUnitActiveSec=300s
+OnBootSec=1min
+
+OnUnitActiveSec=1800s
+
 Persistent=true
 
 [Install]
