@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
+from __future__ import annotations           # <- PEP-604 unions on Py 3.9
 # --------------------------------------------------------------
-# indexLooper.py – fills inscriptionID / inscriptionTimestamp
-# + inscriptionNumber for rows that already have authParent
+# indexLooper.py – fills inscriptionID / inscriptionTimestamp /
+# inscriptionNumber for rows that already have authParent
 # --------------------------------------------------------------
 
-import json
-import time
-import datetime
-import logging
-import requests
-import boto3
+# ---- lock-file cleanup ---------------------------------------
+import os, atexit
+LOCK_FILE = os.getenv("INDEX_LOCK_FILE")      # set by app.py
+if LOCK_FILE:
+    atexit.register(lambda: os.remove(LOCK_FILE)
+                    if os.path.exists(LOCK_FILE) else None)
+
+# ---- standard libs & deps -----------------------------------
+import json, time, datetime, logging, requests, boto3
 from boto3.dynamodb.conditions import Attr
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -18,29 +22,23 @@ HIRO_API_BASE     = "https://api.hiro.so/ordinals/v1/inscriptions"
 WAIT_MAX_SEC      = 20
 WAIT_POLL_SEC     = 0.5
 
-# ───────────────────────────────────────────────────────────────
-# Logging
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────── logging ────────────────────────────
 log = logging.getLogger("indexLooper")
 log.setLevel(logging.DEBUG)
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-for h in (logging.StreamHandler(), logging.FileHandler("indexLooper.log")):
-    h.setFormatter(_fmt)
-    log.addHandler(h)
+for h in (logging.StreamHandler(),
+          logging.FileHandler("indexLooper.log")):
+    h.setFormatter(_fmt); log.addHandler(h)
 
-# ───────────────────────────────────────────────────────────────
-# DynamoDB
-# ───────────────────────────────────────────────────────────────
-dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
-table    = dynamodb.Table("dynamicIndex1")
+# ─────────────────────── DynamoDB ─────────────────────────────
+table = boto3.resource("dynamodb", region_name="us-east-1")\
+             .Table("dynamicIndex1")
 
-# ───────────────────────────────────────────────────────────────
-# ordinals.com fallback widget
-# ───────────────────────────────────────────────────────────────
+# ───────────── ordinals.com fallback widget ──────────────────
 def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
     """
-    Uses the hidden “IL” widget on ordinals.com to resolve the
-    minted‑inscription that corresponds to `block_num`.
+    Uses ordinals.com hidden “IL” widget to find the minted-inscription
+    that corresponds to `block_num`.
     Returns (block_number, inscription_id | error_flag)
     """
     url = ("https://ordinals.com/inscription/"
@@ -49,27 +47,22 @@ def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
         try:
-            page.goto(url)
-            page.wait_for_load_state("networkidle")
+            page.goto(url); page.wait_for_load_state("networkidle")
         except Exception:
-            browser.close()
-            return str(block_num), "PAGE_LOAD_ERROR"
+            browser.close(); return str(block_num), "PAGE_LOAD_ERROR"
 
         frame = next((f for f in page.frames if "/preview/" in f.url), None)
         if not frame:
-            browser.close()
-            return str(block_num), "NO_IFRAME"
+            browser.close(); return str(block_num), "NO_IFRAME"
 
         try:
             frame.wait_for_selector("#blockIL", timeout=5_000)
             frame.fill("#blockIL", str(block_num))
             frame.click("#ilButton")
         except PWTimeout:
-            browser.close()
-            return str(block_num), "NO_FALLBACK_UI"
+            browser.close(); return str(block_num), "NO_FALLBACK_UI"
         except Exception as exc:
-            browser.close()
-            return str(block_num), f"UI_ERROR:{exc}"
+            browser.close(); return str(block_num), f"UI_ERROR:{exc}"
 
         deadline = time.time() + WAIT_MAX_SEC
         while time.time() < deadline:
@@ -78,8 +71,7 @@ def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
                 break
             time.sleep(WAIT_POLL_SEC)
         else:
-            browser.close()
-            return str(block_num), "TIMEOUT"
+            browser.close(); return str(block_num), "TIMEOUT"
 
         browser.close()
 
@@ -88,16 +80,12 @@ def fetch_il_for_block(block_num: int | str) -> tuple[str, str]:
 
     try:
         data = json.loads(out)
-        return (
-            str(data.get("block", block_num)),
-            str(data.get("mintedInscription", "error")),
-        )
+        return (str(data.get("block", block_num)),
+                str(data.get("mintedInscription", "error")))
     except Exception:
         return str(block_num), out
 
-# ───────────────────────────────────────────────────────────────
-# Hiro helpers
-# ───────────────────────────────────────────────────────────────
+# ─────────────────────── Hiro helpers ─────────────────────────
 def fetch_ts_and_number(insc_id: str) -> tuple[int | None, int | None]:
     try:
         r = requests.get(f"{HIRO_API_BASE}/{insc_id}", timeout=10)
@@ -112,65 +100,56 @@ def fetch_ts_and_number(insc_id: str) -> tuple[int | None, int | None]:
         log.error("Hiro API error for %s: %s", insc_id, exc)
         return None, None
 
-# ───────────────────────────────────────────────────────────────
-# Main
-# ───────────────────────────────────────────────────────────────
+# ───────────────────────── main loop ──────────────────────────
 def main() -> None:
     log.info("indexLooper start")
 
     try:
         scan = table.scan(
-            FilterExpression=Attr("authParent").exists()
-            & (
-                Attr("inscriptionID").not_exists()
-                | Attr("inscriptionID").eq("")
-                | Attr("inscriptionID").eq("None")
+            FilterExpression=Attr("authParent").exists() &
+            (
+                Attr("inscriptionID").not_exists() |
+                Attr("inscriptionID").eq("") |
+                Attr("inscriptionID").eq("None")
             )
         )
     except Exception as exc:
-        log.error("scan error: %s", exc)
-        return
+        log.error("scan error: %s", exc); return
 
     items = scan.get("Items", [])
     if not items:
-        log.info("nothing to do")
-        return
+        log.info("nothing to do"); return
 
     for it in sorted(items, key=lambda x: int(x["block_number"])):
         blk = it["block_number"]
         log.info("block %s", blk)
 
-        # ---------- resolve inscriptionID ----------
+        # -------- resolve inscriptionID --------
         _, insc_id = fetch_il_for_block(int(blk))
 
         now = datetime.datetime.utcnow().isoformat() + "Z"
         table.update_item(
-            Key={"block_number": int(blk)},                     # ***** Number PK *****
+            Key={"block_number": int(blk)},
             UpdateExpression="SET inscriptionID=:i, lastProcessedAt=:t",
-            ExpressionAttributeValues={
-                ":i": insc_id,
-                ":t": now,
-            },
+            ExpressionAttributeValues={":i": insc_id, ":t": now},
         )
 
-        # ---------- optional Hiro enrichment ----------
+        # -------- optional Hiro enrichment -----
         if ENABLE_DATE_FETCH and not insc_id.startswith("NO_"):
             ts, num = fetch_ts_and_number(insc_id)
-            expr_parts, vals = [], {}
+            expr, vals = [], {}
             if ts is not None:
-                expr_parts.append("inscriptionTimestamp=:ts")
-                vals[":ts"] = ts
+                expr.append("inscriptionTimestamp=:ts"); vals[":ts"] = ts
             if num is not None:
-                expr_parts.append("inscriptionNumber=:n")
-                vals[":n"] = num
-            if expr_parts:
+                expr.append("inscriptionNumber=:n");    vals[":n"]  = num
+            if expr:
                 table.update_item(
-                    Key={"block_number": int(blk)},             # ***** Number PK *****
-                    UpdateExpression="SET " + ", ".join(expr_parts),
+                    Key={"block_number": int(blk)},
+                    UpdateExpression="SET " + ", ".join(expr),
                     ExpressionAttributeValues=vals,
                 )
 
-        time.sleep(1)
+        time.sleep(1)      # polite delay
 
     log.info("indexLooper done")
 
