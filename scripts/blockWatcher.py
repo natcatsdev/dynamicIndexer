@@ -14,7 +14,7 @@ API_BLOCK   = "https://blockstream.info/api/block/{}"
 table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
 def criteria(block: dict) -> bool:
-    return "3b" in block.get("bits", "")
+    return "8b" in block.get("bits", "")
 
 def tip_height() -> int:
     return int(requests.get(API_HEIGHT, timeout=15).text)
