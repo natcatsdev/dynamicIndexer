@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.6
-# Supports Auth, Index, Run-Both + Scheduler controls
+# DynamicIndexer API – v0.6.2 (Scheduler fixed with sudo)
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json
@@ -32,12 +31,10 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # ───────────── DynamoDB ──────────────
-table = boto3.resource("dynamodb", region_name=DYNAMO_REGION) \
-             .Table(TABLE_NAME)
+table = boto3.resource("dynamodb", region_name=DYNAMO_REGION).Table(TABLE_NAME)
 
 # ───────────── helpers ───────────────
 def _running(lock_path: str) -> bool:
-    """Check if lockfile points to a live (non-zombie) PID."""
     p = Path(lock_path)
     if not p.exists():
         return False
@@ -54,7 +51,6 @@ def _running(lock_path: str) -> bool:
         return False
 
 def _spawn(script: Path, lock_path: str, env_var: str):
-    """Launch script in background if not already running."""
     if _running(lock_path):
         return jsonify({"status": "busy"}), 409
     proc = subprocess.Popen(
@@ -92,13 +88,13 @@ def run_both():
 # ───────────── scheduler endpoints ─────────────
 @app.get("/api/schedule/status")
 def schedule_status():
-    out = subprocess.run(["systemctl", "is-active", TIMER_UNIT], capture_output=True, text=True).stdout.strip()
+    out = subprocess.run(["sudo", "systemctl", "is-active", TIMER_UNIT], capture_output=True, text=True).stdout.strip()
     return {"enabled": out == "active"}
 
 @app.get("/api/schedule/cadence")
 def schedule_get_cadence():
     out = subprocess.run(
-        ["systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
+        ["sudo", "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
         capture_output=True, text=True
     ).stdout.strip()
     secs = int(out.rstrip("s") or "0")
@@ -114,18 +110,18 @@ def schedule_set_cadence():
     os.makedirs(CADENCE_DIR, exist_ok=True)
     Path(CADENCE_FILE).write_text(f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
 
-    subprocess.run(["systemctl", "daemon-reload"])
-    subprocess.run(["systemctl", "restart", TIMER_UNIT])
+    subprocess.run(["sudo", "systemctl", "daemon-reload"])
+    subprocess.run(["sudo", "systemctl", "restart", TIMER_UNIT])
     return {"seconds": seconds}
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
-    subprocess.run(["systemctl", "start", TIMER_UNIT])
+    subprocess.run(["sudo", "systemctl", "start", TIMER_UNIT])
     return {"enabled": True}
 
 @app.post("/api/schedule/disable")
 def schedule_disable():
-    subprocess.run(["systemctl", "stop", TIMER_UNIT])
+    subprocess.run(["sudo", "systemctl", "stop", TIMER_UNIT])
     return {"enabled": False}
 
 # ───────────── dev entrypoint ─────────────
