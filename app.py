@@ -118,18 +118,29 @@ def schedule_set_cadence():
     try:
         data = request.get_json(force=True) or {}
         seconds = int(data.get("seconds", 0))
+
         if not 10 <= seconds <= 86400:
-            return {"error": "Seconds must be 10–86400"}, 400
+            return jsonify({"error": "Seconds must be 10–86400"}), 400
 
+        # Ensure the override directory exists
         os.makedirs(CADENCE_DIR, exist_ok=True)
-        Path(CADENCE_FILE).write_text(
-            f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
 
-        subprocess.run([SUDO_PATH, "systemctl", "daemon-reload"])
-        subprocess.run([SUDO_PATH, "systemctl", "restart", TIMER_UNIT])
+        # Write the override file
+        Path(CADENCE_FILE).write_text(
+            f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8"
+        )
+
+        # Reload systemd and restart the timer
+        subprocess.run(["/usr/bin/sudo", "systemctl", "daemon-reload"], check=True)
+        subprocess.run(["/usr/bin/sudo", "systemctl", "restart", TIMER_UNIT], check=True)
+
         return {"seconds": seconds}
+
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"Systemctl failed: {e}"}), 500
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
+
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
