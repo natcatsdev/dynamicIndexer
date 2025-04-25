@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.6.2 (Scheduler fixed with sudo)
+# DynamicIndexer API – v0.6.3
+# Supports Auth, Index, Run-Both + Scheduler with error reporting
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json
@@ -62,7 +63,7 @@ def _spawn(script: Path, lock_path: str, env_var: str):
     Path(lock_path).write_text(str(proc.pid))
     return jsonify({"status": "started"}), 202
 
-# ───────────── routes ────────────────
+# ───────────── script routes ───────────────
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
@@ -88,41 +89,62 @@ def run_both():
 # ───────────── scheduler endpoints ─────────────
 @app.get("/api/schedule/status")
 def schedule_status():
-    out = subprocess.run(["sudo", "systemctl", "is-active", TIMER_UNIT], capture_output=True, text=True).stdout.strip()
-    return {"enabled": out == "active"}
+    try:
+        out = subprocess.run(["sudo", "systemctl", "is-active", TIMER_UNIT],
+                             capture_output=True, text=True, check=True)
+        return {"enabled": out.stdout.strip() == "active"}
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"is-active failed: {e.stdout.strip()}"}), 500
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 @app.get("/api/schedule/cadence")
 def schedule_get_cadence():
-    out = subprocess.run(
-        ["sudo", "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
-        capture_output=True, text=True
-    ).stdout.strip()
-    secs = int(out.rstrip("s") or "0")
-    return {"seconds": secs}
+    try:
+        out = subprocess.run(
+            ["sudo", "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        out = out.rstrip("s")
+        return {"seconds": int(out) if out.isdigit() else 300}
+    except subprocess.CalledProcessError as e:
+        return jsonify({"error": f"systemctl show failed: {e.stdout.strip()}"}), 500
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 @app.post("/api/schedule/cadence")
 def schedule_set_cadence():
-    data = request.get_json(force=True) or {}
-    seconds = int(data.get("seconds", 0))
-    if not 10 <= seconds <= 86400:
-        return {"error": "Seconds must be 10–86400"}, 400
+    try:
+        data = request.get_json(force=True) or {}
+        seconds = int(data.get("seconds", 0))
+        if not 10 <= seconds <= 86400:
+            return {"error": "Seconds must be 10–86400"}, 400
 
-    os.makedirs(CADENCE_DIR, exist_ok=True)
-    Path(CADENCE_FILE).write_text(f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
+        os.makedirs(CADENCE_DIR, exist_ok=True)
+        Path(CADENCE_FILE).write_text(
+            f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8")
 
-    subprocess.run(["sudo", "systemctl", "daemon-reload"])
-    subprocess.run(["sudo", "systemctl", "restart", TIMER_UNIT])
-    return {"seconds": seconds}
+        subprocess.run(["sudo", "systemctl", "daemon-reload"])
+        subprocess.run(["sudo", "systemctl", "restart", TIMER_UNIT])
+        return {"seconds": seconds}
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
-    subprocess.run(["sudo", "systemctl", "start", TIMER_UNIT])
-    return {"enabled": True}
+    try:
+        subprocess.run(["sudo", "systemctl", "start", TIMER_UNIT])
+        return {"enabled": True}
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 @app.post("/api/schedule/disable")
 def schedule_disable():
-    subprocess.run(["sudo", "systemctl", "stop", TIMER_UNIT])
-    return {"enabled": False}
+    try:
+        subprocess.run(["sudo", "systemctl", "stop", TIMER_UNIT])
+        return {"enabled": False}
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
