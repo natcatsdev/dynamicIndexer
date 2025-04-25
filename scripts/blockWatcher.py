@@ -1,38 +1,49 @@
 #!/usr/bin/env python3
 """
-One-shot BlockWatcher
+BlockWatcher v1.1  –  ONE-SHOT version
 • Reads last processed height from scripts/state/last_height.txt
-• Fetches every new block since then (via blockstream.info)
-• Inserts a row into DynamoDB when the block’s bits (hex) contains MATCH_SUBSTRING
-• Always writes the new height back to last_height.txt
-Exit code 0 → systemd timer schedules the next run in 120 s.
+• Fetches every new block since then (blockstream.info)
+• Inserts a DynamoDB row when the block’s bits (hex) contains MATCH_SUBSTRING
+• ALWAYS records the latest height, even when a block is skipped
+• Exits after a single pass (systemd oneshot unit finishes cleanly)
+
+The systemd timer fires this script every 120 s.
 """
 
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
-import requests, boto3, sys
+import requests, boto3, sys, logging
 
 # ────────── CONFIG ──────────
 REGION           = "us-east-1"
 TABLE_NAME       = "dynamicIndex1"
-MATCH_SUBSTRING  = "8b".lower()       # ← change rule here
+MATCH_SUBSTRING  = "8b".lower()      # ← rule: substring in bits (hex)
 STATE_FILE       = Path(__file__).parent / "state" / "last_height.txt"
 API_HEIGHT       = "https://blockstream.info/api/blocks/tip/height"
 API_BLOCK_JSON   = "https://blockstream.info/api/block/{}"
+TIMEOUT          = 15               # seconds for HTTP requests
+
+# ────────── LOGGING ──────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+LOG = logging.getLogger("BlockWatcher")
 
 # ────────── AWS TABLE ────────
 table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
 # ────────── HELPERS ──────────
 def tip_height() -> int:
-    return int(requests.get(API_HEIGHT, timeout=15).text)
+    return int(requests.get(API_HEIGHT, timeout=TIMEOUT).text)
 
-def block_json(h: int) -> dict:
-    return requests.get(API_BLOCK_JSON.format(h), timeout=15).json()
+def block_json(height: int) -> dict:
+    return requests.get(API_BLOCK_JSON.format(height), timeout=TIMEOUT).json()
 
-def row_matches(blk: dict) -> bool:
-    return MATCH_SUBSTRING in format(blk["bits"], "x")
+def row_matches(bits_int: int) -> bool:
+    return MATCH_SUBSTRING in format(bits_int, "x")
 
 def put_row(blk: dict):
     table.put_item(
@@ -52,34 +63,37 @@ def load_last() -> int:
     STATE_FILE.write_text(str(h))
     return h
 
-def save_last(h: int):
-    STATE_FILE.write_text(str(h))
+def save_last(height: int):
+    STATE_FILE.write_text(str(height))
 
 # ────────── MAIN ─────────────
 def main() -> None:
-    last = load_last()
-    print(f"[Watcher] starting at height {last}")
+    last_height = load_last()
+    LOG.info("start at height %s", last_height)
 
     try:
         tip = tip_height()
-        if tip <= last:
-            print("[Watcher] chain tip unchanged → exit")
+        if tip <= last_height:
+            LOG.info("chain tip unchanged (%s) → exit", tip)
             sys.exit(0)
 
-        for h in range(last + 1, tip + 1):
+        # process every new block once
+        for h in range(last_height + 1, tip + 1):
             blk = block_json(h)
-            if row_matches(blk):
+            if row_matches(blk["bits"]):
                 put_row(blk)
-                print(f"[Watcher] MATCH  height={h} bits=0x{blk['bits']:x}")
+                LOG.info("MATCH height=%s bits=0x%x", h, blk["bits"])
             else:
-                print(f"[Watcher] SKIP   height={h} bits=0x{blk['bits']:x}")
+                LOG.info("SKIP  height=%s bits=0x%x", h, blk["bits"])
 
             save_last(h)
 
-        print(f"[Watcher] processed up to {tip}")
+        LOG.info("processed up to %s → exit", tip)
+        sys.exit(0)
+
     except Exception as exc:
-        print("[Watcher] ERROR:", exc, file=sys.stderr)
-        sys.exit(1)          # non-zero → systemd will log failure
+        LOG.error("ERROR: %s", exc, exc_info=True)
+        sys.exit(1)   # non-zero → systemd records failure
 
 if __name__ == "__main__":
     main()
