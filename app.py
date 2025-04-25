@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.8.0  (adds Block-Watcher)
+# DynamicIndexer API – v0.8.1  (adds Block-Watcher)
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json, re
@@ -24,7 +24,7 @@ BOTH_LOCK     = "/tmp/runboth.lock"
 
 # run-both timer
 TIMER_UNIT    = "runboth.timer"
-TIMER_FILE    = Path("/home/ec2-user/dynamicIndexer/systemd/runboth.timer")
+TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
 
 # block-watcher timer
@@ -81,9 +81,17 @@ def block_data():
     items.sort(key=lambda x: int(x.get("block_number", 0)))
     return jsonify(items)
 
-@app.post("/api/run-authscript")         ; run_auth  = lambda: _spawn(AUTH_SCRIPT,  AUTH_LOCK,  "AUTH_LOCK_FILE")
-@app.post("/api/run-inscriptionscript")  ; run_index = lambda: _spawn(INDEX_SCRIPT, INDEX_LOCK, "INDEX_LOCK_FILE")
-@app.post("/api/run-both")               ; run_both  = lambda: _spawn(BOTH_SCRIPT,  BOTH_LOCK,  "RUN_BOTH_LOCK_FILE")
+@app.post("/api/run-authscript")
+def run_auth():
+    return _spawn(AUTH_SCRIPT, AUTH_LOCK, "AUTH_LOCK_FILE")
+
+@app.post("/api/run-inscriptionscript")
+def run_index():
+    return _spawn(INDEX_SCRIPT, INDEX_LOCK, "INDEX_LOCK_FILE")
+
+@app.post("/api/run-both")
+def run_both():
+    return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
 # ───────────── run-both timer endpoints ──────────
 @app.get("/api/schedule/status")
@@ -110,8 +118,13 @@ def schedule_cadence_set():
     _sd("daemon-reload"); _sd("restart", TIMER_UNIT)
     return {"seconds": seconds}, 202
 
-@app.post("/api/schedule/enable")  ; schedule_enable  = lambda: (_sd("start",  TIMER_UNIT),  {"enabled": True})
-@app.post("/api/schedule/disable") ; schedule_disable = lambda: (_sd("stop",   TIMER_UNIT),  {"enabled": False})
+@app.post("/api/schedule/enable")
+def schedule_enable():
+    _sd("start", TIMER_UNIT); return {"enabled": True}
+
+@app.post("/api/schedule/disable")
+def schedule_disable():
+    _sd("stop", TIMER_UNIT);  return {"enabled": False}
 
 # ───────────── Block-Watcher endpoints ───────────
 @app.get("/api/watcher/status")
@@ -120,8 +133,13 @@ def watcher_status():
                          capture_output=True, text=True)
     return {"running": out.stdout.strip() == "active"}
 
-@app.post("/api/watcher/enable")  ; watcher_enable  = lambda: (_sd("start",  WATCHER_UNIT), {"running": True})
-@app.post("/api/watcher/disable") ; watcher_disable = lambda: (_sd("stop",   WATCHER_UNIT), {"running": False})
+@app.post("/api/watcher/enable")
+def watcher_enable():
+    _sd("start", WATCHER_UNIT); return {"running": True}
+
+@app.post("/api/watcher/disable")
+def watcher_disable():
+    _sd("stop", WATCHER_UNIT);  return {"running": False}
 
 @app.get("/api/watcher/lastht")
 def watcher_last_ht():
