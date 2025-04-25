@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.6.4 (absolute /usr/bin/sudo fix)
+# DynamicIndexer API – v0.7.0
 # ---------------------------------------------------
 from __future__ import annotations
-import os, sys, subprocess, json
+import os, sys, subprocess, json, re
 from pathlib import Path
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -23,10 +23,10 @@ INDEX_LOCK    = "/tmp/indexscript.lock"
 BOTH_LOCK     = "/tmp/runboth.lock"
 
 TIMER_UNIT    = "runboth.timer"
-CADENCE_DIR   = f"/etc/systemd/system/{TIMER_UNIT}.d"
-CADENCE_FILE  = f"{CADENCE_DIR}/override.conf"
+TIMER_FILE    = Path("/home/ec2-user/dynamicIndexer/systemd/runboth.timer")
 
-SUDO_PATH = "/usr/bin/sudo"   # <<<<<< correct absolute sudo path
+SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
+SUDO_PATH     = "/usr/bin/sudo"      # absolute sudo path
 
 # ───────────── Flask / CORS ──────────
 app = Flask(__name__)
@@ -45,6 +45,7 @@ def _running(lock_path: str) -> bool:
         proc_dir = Path(f"/proc/{pid}")
         if not proc_dir.exists():
             raise RuntimeError
+        # zombie = "State:\tZ" in /proc/PID/status
         if "\nState:\tZ" in (proc_dir / "status").read_text():
             raise RuntimeError
         return True
@@ -63,6 +64,10 @@ def _spawn(script: Path, lock_path: str, env_var: str):
     )
     Path(lock_path).write_text(str(proc.pid))
     return jsonify({"status": "started"}), 202
+
+def _systemd_reload_and_restart():
+    subprocess.run([SUDO_PATH, "systemctl", "daemon-reload"], check=True)
+    subprocess.run([SUDO_PATH, "systemctl", "restart", TIMER_UNIT], check=True)
 
 # ───────────── script routes ───────────────
 @app.get("/api/ping")
@@ -102,14 +107,10 @@ def schedule_status():
 @app.get("/api/schedule/cadence")
 def schedule_get_cadence():
     try:
-        out = subprocess.run(
-            [SUDO_PATH, "systemctl", "show", TIMER_UNIT, "--property=OnUnitActiveSec", "--value"],
-            capture_output=True, text=True, check=True
-        ).stdout.strip()
-        out = out.rstrip("s")
-        return {"seconds": int(out) if out.isdigit() else 300}
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"systemctl show failed: {e.stdout.strip()}"}), 500
+        txt = TIMER_FILE.read_text()
+        m = SEC_RE.search(txt)
+        seconds = int(m.group(1)) if m else None
+        return {"seconds": seconds}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
 
@@ -119,33 +120,29 @@ def schedule_set_cadence():
         data = request.get_json(force=True) or {}
         seconds = int(data.get("seconds", 0))
 
-        if not 10 <= seconds <= 86400:
-            return jsonify({"error": "Seconds must be 10–86400"}), 400
+        if not 60 <= seconds <= 86_400:
+            return jsonify({"error": "Seconds must be 60–86400"}), 400
 
-        # Ensure the override directory exists
-        os.makedirs(CADENCE_DIR, exist_ok=True)
+        txt = TIMER_FILE.read_text()
+        if SEC_RE.search(txt):
+            txt = SEC_RE.sub(f"OnUnitActiveSec={seconds}s", txt)
+        else:
+            # append if the line was ever removed
+            txt += f"\nOnUnitActiveSec={seconds}s\n"
+        TIMER_FILE.write_text(txt)
 
-        # Write the override file
-        Path(CADENCE_FILE).write_text(
-            f"[Timer]\nOnUnitActiveSec={seconds}s\n", encoding="utf-8"
-        )
-
-        # Reload systemd and restart the timer
-        subprocess.run(["/usr/bin/sudo", "systemctl", "daemon-reload"], check=True)
-        subprocess.run(["/usr/bin/sudo", "systemctl", "restart", TIMER_UNIT], check=True)
-
-        return {"seconds": seconds}
+        _systemd_reload_and_restart()
+        return {"seconds": seconds}, 202
 
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"Systemctl failed: {e}"}), 500
+        return jsonify({"error": f"systemctl failed: {e}"}), 500
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
-
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
     try:
-        subprocess.run([SUDO_PATH, "systemctl", "start", TIMER_UNIT])
+        subprocess.run([SUDO_PATH, "systemctl", "start", TIMER_UNIT], check=True)
         return {"enabled": True}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
@@ -153,7 +150,7 @@ def schedule_enable():
 @app.post("/api/schedule/disable")
 def schedule_disable():
     try:
-        subprocess.run([SUDO_PATH, "systemctl", "stop", TIMER_UNIT])
+        subprocess.run([SUDO_PATH, "systemctl", "stop", TIMER_UNIT], check=True)
         return {"enabled": False}
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
