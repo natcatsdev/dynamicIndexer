@@ -26,7 +26,7 @@ table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
 
 def criteria(block: dict) -> bool:
-    return SUBSTRING in block.get("bits", "")
+    return SUBSTRING in str(block.get("bits", ""))
 
 
 def tip_height() -> int:
