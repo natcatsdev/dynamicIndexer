@@ -1,5 +1,8 @@
+# /etc/systemd/system/blockWatcher.service
 [Unit]
-Description=Watch BTC blocks and insert DynamoDB rows.
+Description=Write every BTC block (producer)
+# When this service finishes *successfully*, also start the checker
+OnSuccess=criteriaChecker-8b.service
 
 [Service]
 Type=oneshot

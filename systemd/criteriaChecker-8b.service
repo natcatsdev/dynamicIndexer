@@ -1,0 +1,10 @@
+[Unit]
+Description=CriteriaChecker (bits contains 8b)
+
+[Service]
+Type=oneshot
+User=ec2-user
+WorkingDirectory=/home/ec2-user/dynamicIndexer
+Environment="PATH=/home/ec2-user/dynamicIndexer/.venv/bin"
+Environment="CRITERIA_MODULE=criteria_bits8b"
+ExecStart=/home/ec2-user/dynamicIndexer/.venv/bin/python scripts/criteriaChecker.py
