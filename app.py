@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.7.0
+# DynamicIndexer API – v0.8.1  (adds Block-Watcher)
 # ---------------------------------------------------
 from __future__ import annotations
 import os, sys, subprocess, json, re
@@ -22,11 +22,16 @@ AUTH_LOCK     = "/tmp/authscript.lock"
 INDEX_LOCK    = "/tmp/indexscript.lock"
 BOTH_LOCK     = "/tmp/runboth.lock"
 
+# run-both timer
 TIMER_UNIT    = "runboth.timer"
-TIMER_FILE    = Path("/home/ec2-user/dynamicIndexer/systemd/runboth.timer")
-
+TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
-SUDO_PATH     = "/usr/bin/sudo"      # absolute sudo path
+
+# block-watcher timer
+WATCHER_UNIT  = "blockWatcher.timer"
+LAST_FILE     = BASE_DIR / "scripts" / "state" / "last_height.txt"
+
+SUDO_PATH     = "/usr/bin/sudo"
 
 # ───────────── Flask / CORS ──────────
 app = Flask(__name__)
@@ -36,40 +41,36 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 table = boto3.resource("dynamodb", region_name=DYNAMO_REGION).Table(TABLE_NAME)
 
 # ───────────── helpers ───────────────
-def _running(lock_path: str) -> bool:
-    p = Path(lock_path)
+def _running(lock: str) -> bool:
+    p = Path(lock)
     if not p.exists():
         return False
     try:
         pid = int(p.read_text())
-        proc_dir = Path(f"/proc/{pid}")
-        if not proc_dir.exists():
-            raise RuntimeError
-        # zombie = "State:\tZ" in /proc/PID/status
-        if "\nState:\tZ" in (proc_dir / "status").read_text():
+        proc = Path(f"/proc/{pid}")
+        if not proc.exists() or "\nState:\tZ" in (proc / "status").read_text():
             raise RuntimeError
         return True
     except Exception:
         p.unlink(missing_ok=True)
         return False
 
-def _spawn(script: Path, lock_path: str, env_var: str):
-    if _running(lock_path):
+def _spawn(script: Path, lock: str, env_var: str):
+    if _running(lock):
         return jsonify({"status": "busy"}), 409
     proc = subprocess.Popen(
         [sys.executable, str(script)],
-        env={**os.environ, env_var: lock_path},
+        env={**os.environ, env_var: lock},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(lock_path).write_text(str(proc.pid))
+    Path(lock).write_text(str(proc.pid))
     return jsonify({"status": "started"}), 202
 
-def _systemd_reload_and_restart():
-    subprocess.run([SUDO_PATH, "systemctl", "daemon-reload"], check=True)
-    subprocess.run([SUDO_PATH, "systemctl", "restart", TIMER_UNIT], check=True)
+def _sd(*args):
+    subprocess.run([SUDO_PATH, "systemctl", *args], check=True)
 
-# ───────────── script routes ───────────────
+# ───────────── one-shot script routes ─────────────
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
@@ -92,68 +93,57 @@ def run_index():
 def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
-# ───────────── scheduler endpoints ─────────────
+# ───────────── run-both timer endpoints ──────────
 @app.get("/api/schedule/status")
 def schedule_status():
-    try:
-        out = subprocess.run([SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
-                             capture_output=True, text=True, check=True)
-        return {"enabled": out.stdout.strip() == "active"}
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"is-active failed: {e.stdout.strip()}"}), 500
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+    out = subprocess.run([SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
+                         capture_output=True, text=True)
+    return {"enabled": out.stdout.strip() == "active"}
 
 @app.get("/api/schedule/cadence")
-def schedule_get_cadence():
-    try:
-        txt = TIMER_FILE.read_text()
-        m = SEC_RE.search(txt)
-        seconds = int(m.group(1)) if m else None
-        return {"seconds": seconds}
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+def schedule_cadence_get():
+    txt = TIMER_FILE.read_text()
+    m   = SEC_RE.search(txt)
+    return {"seconds": int(m.group(1)) if m else None}
 
 @app.post("/api/schedule/cadence")
-def schedule_set_cadence():
-    try:
-        data = request.get_json(force=True) or {}
-        seconds = int(data.get("seconds", 0))
-
-        if not 60 <= seconds <= 86_400:
-            return jsonify({"error": "Seconds must be 60–86400"}), 400
-
-        txt = TIMER_FILE.read_text()
-        if SEC_RE.search(txt):
-            txt = SEC_RE.sub(f"OnUnitActiveSec={seconds}s", txt)
-        else:
-            # append if the line was ever removed
-            txt += f"\nOnUnitActiveSec={seconds}s\n"
-        TIMER_FILE.write_text(txt)
-
-        _systemd_reload_and_restart()
-        return {"seconds": seconds}, 202
-
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"systemctl failed: {e}"}), 500
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+def schedule_cadence_set():
+    seconds = int((request.get_json(force=True) or {}).get("seconds", 0))
+    if not 60 <= seconds <= 86_400:
+        return {"error": "Seconds must be 60–86400"}, 400
+    txt = TIMER_FILE.read_text()
+    txt = SEC_RE.sub(f"OnUnitActiveSec={seconds}s", txt) if SEC_RE.search(txt) \
+          else txt + f"\nOnUnitActiveSec={seconds}s\n"
+    TIMER_FILE.write_text(txt)
+    _sd("daemon-reload"); _sd("restart", TIMER_UNIT)
+    return {"seconds": seconds}, 202
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
-    try:
-        subprocess.run([SUDO_PATH, "systemctl", "start", TIMER_UNIT], check=True)
-        return {"enabled": True}
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+    _sd("start", TIMER_UNIT); return {"enabled": True}
 
 @app.post("/api/schedule/disable")
 def schedule_disable():
-    try:
-        subprocess.run([SUDO_PATH, "systemctl", "stop", TIMER_UNIT], check=True)
-        return {"enabled": False}
-    except Exception as ex:
-        return jsonify({"error": str(ex)}), 500
+    _sd("stop", TIMER_UNIT);  return {"enabled": False}
+
+# ───────────── Block-Watcher endpoints ───────────
+@app.get("/api/watcher/status")
+def watcher_status():
+    out = subprocess.run([SUDO_PATH, "systemctl", "is-active", WATCHER_UNIT],
+                         capture_output=True, text=True)
+    return {"running": out.stdout.strip() == "active"}
+
+@app.post("/api/watcher/enable")
+def watcher_enable():
+    _sd("start", WATCHER_UNIT); return {"running": True}
+
+@app.post("/api/watcher/disable")
+def watcher_disable():
+    _sd("stop", WATCHER_UNIT);  return {"running": False}
+
+@app.get("/api/watcher/lastht")
+def watcher_last_ht():
+    return {"lastHeight": int(LAST_FILE.read_text()) if LAST_FILE.exists() else None}
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
