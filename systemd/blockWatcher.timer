@@ -3,7 +3,7 @@ Description=Ensure blockWatcher keeps running
 
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=5min         # restart if it ever exits
+OnUnitActiveSec=5min
 Persistent=true
 AccuracySec=5s
 
