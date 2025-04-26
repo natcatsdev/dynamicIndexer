@@ -1,0 +1,12 @@
+[Unit]
+Description=Add match=true/false when bits hex contains 3b
+Requires=blockWatcher.service
+After=blockWatcher.service
+
+[Service]
+Type=oneshot
+User=ec2-user
+WorkingDirectory=/home/ec2-user/dynamicIndexer
+Environment="PATH=/home/ec2-user/dynamicIndexer/.venv/bin"
+ExecStart=/home/ec2-user/dynamicIndexer/.venv/bin/python scripts/matchChecker.py
+SuccessExitStatus=0
