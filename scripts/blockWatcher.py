@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 BlockWatcher – one-shot producer.
-Runs every ~120 s via runfast.timer, inserts a row the first time we see a
-block whose bits (in hex) contains the substring “8b”.
+
+• Runs every ~120 s via runfast.timer
+• Inserts a row the first time we see a block whose bits (hex) contains
+  the substring “8b”.
+• Stores bits **in hexadecimal** (e.g. 0x1d00ffff) and firstSeen timestamp.
 """
 
 import sys, json, requests, boto3
@@ -12,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 REGION, TABLE_NAME = "us-east-1", "dynamicIndex1"
-SUBSTRING = "8b"
+SUBSTRING           = "8b"
 
 STATE_FILE = Path(__file__).parent / "state" / "last_height.txt"
 API_TIP_H  = "https://blockstream.info/api/blocks/tip/height"
@@ -21,10 +24,8 @@ API_BHASH  = "https://blockstream.info/api/block/{}"
 
 table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
-
-# ───────────────────────── helpers ──────────────────────────────────────────
+# ─────────────── helpers ──────────────────────────────────────────────
 def criteria(block: dict) -> bool:
-    """Return True if the block’s bits (hex) contains SUBSTRING."""
     bits_val = block.get("bits")
     bits_hex = format(bits_val, "x") if isinstance(bits_val, int) else str(bits_val).lower()
     return SUBSTRING in bits_hex
@@ -35,7 +36,6 @@ def tip_height() -> int:
 
 
 def block_json(h: int) -> Optional[dict]:
-    """Full JSON for block *h* or None if not yet available."""
     r_hash = requests.get(API_H2HASH.format(h), timeout=15)
     blk_hash = r_hash.text.strip()
     if r_hash.status_code != 200 or not blk_hash:
@@ -54,12 +54,13 @@ def block_json(h: int) -> Optional[dict]:
 
 
 def put_row(blk: dict) -> None:
-    """Insert the row with firstSeen (only called on first encounter)."""
+    """Insert row on first encounter; bits stored as hex string."""
+    bits_hex = f"0x{blk['bits']:x}"
     table.put_item(Item={
-        "block_number":  Decimal(str(blk["height"])),      # numeric PK
-        "bits":          str(blk["bits"]),                 # store decimal bits
-        "firstSeen":     datetime.now(timezone.utc).isoformat(),
-        # dateAvailable gets filled later by authLooperBackend
+        "block_number": Decimal(str(blk["height"])),   # numeric PK
+        "bits":        bits_hex,                       # now hex
+        "firstSeen":   datetime.now(timezone.utc).isoformat(),
+        # dateAvailable written later by authLooperBackend
     })
 
 
@@ -75,8 +76,7 @@ def load_last() -> int:
 def save_last(h: int) -> None:
     STATE_FILE.write_text(str(h))
 
-
-# ─────────────────────────── main ───────────────────────────────────────────
+# ─────────────── main ────────────────────────────────────────────────
 def main() -> None:
     last = load_last()
     print(f"BlockWatcher → starting at {last}")
@@ -86,9 +86,9 @@ def main() -> None:
         for h in range(last + 1, tip + 1):
             blk = block_json(h)
             if blk is None:
-                continue                # skip gaps; retry next run
+                continue            # skip gaps; retry next run
             if criteria(blk):
-                bits_hex = format(blk["bits"], "x")
+                bits_hex = f"0x{blk['bits']:x}"
                 put_row(blk)
                 print(f"Inserted {h}  bits-hex={bits_hex}")
             save_last(h)
