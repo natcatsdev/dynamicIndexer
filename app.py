@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.5  (next-run via list-timers fallback)
+# DynamicIndexer API – v0.9.6  (nextRun fully working)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -79,8 +79,8 @@ def _sd(*args):
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
-    Return {enabled, lastRun, nextRun} safely.
-    Falls back to parsing `systemctl list-timers` if NextElapse keys are empty.
+    Return {enabled, lastRun, nextRun}.  Falls back to parsing
+    `systemctl list-timers` when NextElapse keys are empty.
     """
     try:
         raw = subprocess.check_output(
@@ -103,7 +103,7 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     def _parse(ts: str | None) -> str | None:
         if not ts or ts == "n/a":
             return None
-        if ts.isdigit():                     # epoch-microseconds
+        if ts.isdigit():  # epoch-micros
             try:
                 return (
                     datetime.utcfromtimestamp(int(ts) / 1_000_000)
@@ -128,7 +128,6 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 continue
         return None
 
-    # primary keys
     last_iso = _parse(kv.get("LastTriggerUSec"))
     next_iso = _parse(
         kv.get("NextElapseUSec")
@@ -136,7 +135,7 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
         or kv.get("NextElapseUSecMonotonic")
     )
 
-    # fallback via list-timers
+    # fallback: list-timers
     if next_iso is None:
         try:
             row = subprocess.check_output(
@@ -144,8 +143,10 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 text=True,
             ).strip()
             if row:
-                # first 5 tokens compose the timestamp "Sun 2025-04-27 07:00:28 UTC"
-                next_iso = _parse(" ".join(row.split()[:5]))
+                parts = row.split()
+                if "UTC" in parts:
+                    ts_str = " ".join(parts[: parts.index("UTC") + 1])  # Sun … UTC
+                    next_iso = _parse(ts_str)
         except Exception:
             pass
 
