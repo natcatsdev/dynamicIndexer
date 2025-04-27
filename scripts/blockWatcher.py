@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+BlockWatcher – one-shot producer.
+Runs every ~120 s via runfast.timer, inserts a row the first time we see a
+block whose bits (in hex) contains the substring “8b”.
+"""
+
 import sys, json, requests, boto3
 from typing import Optional
 from pathlib import Path
@@ -16,8 +22,9 @@ API_BHASH  = "https://blockstream.info/api/block/{}"
 table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE_NAME)
 
 
+# ───────────────────────── helpers ──────────────────────────────────────────
 def criteria(block: dict) -> bool:
-    """True if the block’s bits—in hex—contains SUBSTRING."""
+    """Return True if the block’s bits (hex) contains SUBSTRING."""
     bits_val = block.get("bits")
     bits_hex = format(bits_val, "x") if isinstance(bits_val, int) else str(bits_val).lower()
     return SUBSTRING in bits_hex
@@ -28,6 +35,7 @@ def tip_height() -> int:
 
 
 def block_json(h: int) -> Optional[dict]:
+    """Full JSON for block *h* or None if not yet available."""
     r_hash = requests.get(API_H2HASH.format(h), timeout=15)
     blk_hash = r_hash.text.strip()
     if r_hash.status_code != 200 or not blk_hash:
@@ -46,10 +54,12 @@ def block_json(h: int) -> Optional[dict]:
 
 
 def put_row(blk: dict) -> None:
+    """Insert the row with firstSeen (only called on first encounter)."""
     table.put_item(Item={
-        "block_number":  Decimal(str(blk["height"])),  # numeric PK
-        "bits":          str(blk["bits"]),
-        "dateAvailable": datetime.now(timezone.utc).isoformat(),
+        "block_number":  Decimal(str(blk["height"])),      # numeric PK
+        "bits":          str(blk["bits"]),                 # store decimal bits
+        "firstSeen":     datetime.now(timezone.utc).isoformat(),
+        # dateAvailable gets filled later by authLooperBackend
     })
 
 
@@ -62,11 +72,12 @@ def load_last() -> int:
     return ht
 
 
-def save_last(h: int):
+def save_last(h: int) -> None:
     STATE_FILE.write_text(str(h))
 
 
-def main():
+# ─────────────────────────── main ───────────────────────────────────────────
+def main() -> None:
     last = load_last()
     print(f"BlockWatcher → starting at {last}")
 
@@ -75,11 +86,11 @@ def main():
         for h in range(last + 1, tip + 1):
             blk = block_json(h)
             if blk is None:
-                continue                           # skip gaps
+                continue                # skip gaps; retry next run
             if criteria(blk):
                 bits_hex = format(blk["bits"], "x")
-                print(f"Inserted {h}  bits-hex={bits_hex}")
                 put_row(blk)
+                print(f"Inserted {h}  bits-hex={bits_hex}")
             save_last(h)
     except Exception as exc:
         print("ERROR:", exc)
