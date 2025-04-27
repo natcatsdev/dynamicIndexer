@@ -1,5 +1,6 @@
 [Unit]
 Description=Ensure blockWatcher keeps running
+ConditionPathExists=/home/ec2-user/dynamicIndexer/enable_blockwatcher
 
 [Timer]
 OnBootSec=30s
