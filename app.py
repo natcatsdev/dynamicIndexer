@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.2  (defensive timer status)
+# DynamicIndexer API – v0.9.3  (accurate timer enabled flag)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ INDEX_LOCK    = "/tmp/indexscript.lock"
 BOTH_LOCK     = "/tmp/runboth.lock"
 
 # timers (current layout)
-RUNFAST_UNIT  = "runfast.timer"      # Block-Watcher → Match-Checker → Auth-Looper
+RUNFAST_UNIT  = "runfast.timer"      # Block-Watcher → Auth-Looper
 RUNSLOW_UNIT  = "runslow.timer"      # Index-Looper
 TIMER_UNITS   = {"runfast": RUNFAST_UNIT, "runslow": RUNSLOW_UNIT}
 
-# legacy “runboth” timer (older UI)
+# legacy run-both timer (old UI)
 TIMER_UNIT    = "runboth.timer"
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
@@ -85,7 +85,6 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
     Safe report of a systemd .timer unit.
     Always returns keys: enabled, lastRun, nextRun (ISO-8601 or None).
-    Never raises.
     """
     try:
         raw = subprocess.check_output(
@@ -94,22 +93,19 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 "systemctl",
                 "show",
                 unit,
-                "--property=State,LastTriggerUSec,NextElapseUSec",
+                "--property=ActiveState,State,LastTriggerUSec,NextElapseUSec",
                 "--no-page",
             ],
             text=True,
         )
         kv = dict(line.split("=", 1) for line in raw.strip().splitlines())
     except Exception as e:
-        # systemctl failed
         return {"enabled": False, "lastRun": None, "nextRun": None, "error": str(e)}
 
     def parse(val: str | None) -> str | None:
         if not val or val == "n/a":
             return None
-
-        # digits → micros since epoch
-        if val.isdigit():
+        if val.isdigit():                                # epoch-micros
             try:
                 return (
                     datetime.utcfromtimestamp(int(val) / 1_000_000)
@@ -118,8 +114,6 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 )
             except Exception:
                 return None
-
-        # try a few formats
         for fmt in (
             "%a %Y-%m-%d %H:%M:%S %Z",
             "%a %Y-%m-%d %H:%M:%S",
@@ -134,14 +128,14 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 )
             except ValueError:
                 continue
-        return None  # couldn’t parse
+        return None
 
     return {
-        "enabled": kv.get("State") in {"waiting", "running"},
+        "enabled": kv.get("ActiveState") == "active"                # primary
+                   or kv.get("State") in {"waiting", "running"},    # fallback
         "lastRun": parse(kv.get("LastTriggerUSec")),
         "nextRun": parse(kv.get("NextElapseUSec")),
     }
-
 
 # ───────────── one-shot script routes ─────────────
 @app.get("/api/ping")
@@ -177,7 +171,6 @@ def timer_status(timer: str):
     if timer not in TIMER_UNITS:
         abort(404, description="unknown timer")
     return _timer_status(TIMER_UNITS[timer])
-
 
 # ───────────── legacy run-both timer endpoints ────
 @app.get("/api/schedule/status")
