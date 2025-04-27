@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.3  (accurate timer enabled flag)
+# DynamicIndexer API – v0.9.4  (next-run works on AL2023)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -24,17 +24,14 @@ AUTH_LOCK     = "/tmp/authscript.lock"
 INDEX_LOCK    = "/tmp/indexscript.lock"
 BOTH_LOCK     = "/tmp/runboth.lock"
 
-# timers (current layout)
-RUNFAST_UNIT  = "runfast.timer"      # Block-Watcher → Auth-Looper
-RUNSLOW_UNIT  = "runslow.timer"      # Index-Looper
+RUNFAST_UNIT  = "runfast.timer"
+RUNSLOW_UNIT  = "runslow.timer"
 TIMER_UNITS   = {"runfast": RUNFAST_UNIT, "runslow": RUNSLOW_UNIT}
 
-# legacy run-both timer (old UI)
-TIMER_UNIT    = "runboth.timer"
+TIMER_UNIT    = "runboth.timer"                # legacy
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
 
-# block-watcher
 WATCHER_UNIT  = "blockWatcher.timer"
 LAST_FILE     = BASE_DIR / "scripts" / "state" / "last_height.txt"
 
@@ -49,7 +46,6 @@ table = boto3.resource("dynamodb", region_name=DYNAMO_REGION).Table(TABLE_NAME)
 
 # ───────────── helpers ───────────────
 def _running(lock: str) -> bool:
-    """Check PID file; prune if stale."""
     p = Path(lock)
     if not p.exists():
         return False
@@ -82,10 +78,7 @@ def _sd(*args):
 
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
-    """
-    Safe report of a systemd .timer unit.
-    Always returns keys: enabled, lastRun, nextRun (ISO-8601 or None).
-    """
+    """Return {enabled,lastRun,nextRun} safely."""
     try:
         raw = subprocess.check_output(
             [
@@ -93,7 +86,9 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 "systemctl",
                 "show",
                 unit,
-                "--property=ActiveState,State,LastTriggerUSec,NextElapseUSec",
+                "--property=ActiveState,State,"
+                "LastTriggerUSec,NextElapseUSec,"
+                "NextElapseUSecRealtime,NextElapseUSecMonotonic",
                 "--no-page",
             ],
             text=True,
@@ -105,7 +100,7 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     def parse(val: str | None) -> str | None:
         if not val or val == "n/a":
             return None
-        if val.isdigit():                                # epoch-micros
+        if val.isdigit():
             try:
                 return (
                     datetime.utcfromtimestamp(int(val) / 1_000_000)
@@ -130,14 +125,20 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 continue
         return None
 
+    next_raw = (
+        kv.get("NextElapseUSec")
+        or kv.get("NextElapseUSecRealtime")
+        or kv.get("NextElapseUSecMonotonic")
+    )
+
     return {
-        "enabled": kv.get("ActiveState") == "active"                # primary
-                   or kv.get("State") in {"waiting", "running"},    # fallback
+        "enabled": kv.get("ActiveState") == "active"
+                   or kv.get("State") in {"waiting", "running"},
         "lastRun": parse(kv.get("LastTriggerUSec")),
-        "nextRun": parse(kv.get("NextElapseUSec")),
+        "nextRun": parse(next_raw),
     }
 
-# ───────────── one-shot script routes ─────────────
+# ───────────── one-shot routes ─────────────
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
@@ -165,14 +166,14 @@ def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
 
-# ───────────── generic timer status ───────────────
+# ───────────── timer status route ───────────
 @app.get("/api/timer/<timer>/status")
 def timer_status(timer: str):
     if timer not in TIMER_UNITS:
         abort(404, description="unknown timer")
     return _timer_status(TIMER_UNITS[timer])
 
-# ───────────── legacy run-both timer endpoints ────
+# ───────────── legacy run-both endpoints ────
 @app.get("/api/schedule/status")
 def schedule_status():
     out = subprocess.run(
@@ -219,7 +220,7 @@ def schedule_disable():
     return {"enabled": False}
 
 
-# ───────────── Block-Watcher endpoints ───────────
+# ───────────── Block-Watcher endpoints ──────
 @app.get("/api/watcher/status")
 def watcher_status():
     out = subprocess.run(
