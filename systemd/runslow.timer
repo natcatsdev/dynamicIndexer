@@ -3,8 +3,8 @@ Description=Slow inscription indexer timer
 
 [Timer]
 OnBootSec=5m
-OnUnitActiveSec=1800s      # 30 min (adjust as you like)
-Unit=indexLooper.service   # ← tell systemd which service to fire
+OnUnitActiveSec=1800s
+Unit=indexLooper.service
 Persistent=true
 
 [Install]
