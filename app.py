@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.8  (nextRun even when UTC is elided)
+# DynamicIndexer API – v0.9.9  (adds /api/export/index.json)
 # ---------------------------------------------------
 from __future__ import annotations
 
-import os, sys, subprocess, re
+import os, sys, subprocess, re, json                     # ← json for export
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Flask, jsonify, request, abort
+from flask import Flask, jsonify, request, abort, Response
 from flask_cors import CORS
 import boto3
+from boto3.dynamodb.conditions import Attr               # ← new import
 
 # ───────────── constants ─────────────
 DYNAMO_REGION = "us-east-1"
@@ -146,8 +147,8 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 parts = row.split()
                 if "UTC" in parts:
                     ts_str = " ".join(parts[: parts.index("UTC") + 1])  # Sun … UTC
-                else:  # UTC missing (truncated rows) → first 4 tokens
-                    ts_str = " ".join(parts[:4])                        # Sun … HH:MM:SS
+                else:                                                  # no UTC token
+                    ts_str = " ".join(parts[:4])                       # Sun … HH:MM:SS
                 next_iso = _parse(ts_str)
         except Exception:
             pass
@@ -264,6 +265,49 @@ def watcher_disable():
 @app.get("/api/watcher/lastht")
 def watcher_last_ht():
     return {"lastHeight": int(LAST_FILE.read_text()) if LAST_FILE.exists() else None}
+
+# ───────────── export index (NEW) ───────────────
+@app.get("/api/export/index.json")
+def export_index():
+    """
+    Return JSON array of rows whose inscriptionID exists and is >64 chars.
+    Dummy traits: 'Trait 6' / 'Trait 9' when block_number text contains 6 or 9.
+    """
+    try:
+        scan = table.scan(
+            FilterExpression=Attr("inscriptionID").exists() &
+                             Attr("inscriptionID").size().gt(64)
+        )
+    except Exception as e:
+        abort(500, f"dynamo scan failed: {e}")
+
+    items = scan.get("Items", [])
+    out   = []
+    for it in items:
+        h   = int(it["block_number"])
+        iid = it["inscriptionID"]
+
+        traits = []
+        if "6" in str(h):
+            traits.append({"value": "true", "trait_type": "Trait 6"})
+        if "9" in str(h):
+            traits.append({"value": "true", "trait_type": "Trait 9"})
+
+        out.append({
+            "id": iid,
+            "meta": {
+                "name": f"Natcat #{h}",
+                "attributes": traits,
+                "high_res_img_url": (
+                    "https://renderer.magiceden.dev/v2/dmt-natcats"
+                    f"?v=2&block={h}"
+                )
+            }
+        })
+
+    resp = Response(json.dumps(out), mimetype="application/json")
+    resp.headers["Content-Disposition"] = "attachment; filename=index.json"
+    return resp
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
