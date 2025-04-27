@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.8.1  (adds Block-Watcher)
+# DynamicIndexer API – v0.9.0  (adds generic timer status)
 # ---------------------------------------------------
 from __future__ import annotations
+
 import os, sys, subprocess, json, re
+from datetime import datetime, timezone
 from pathlib import Path
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, abort
 from flask_cors import CORS
 import boto3
 
@@ -22,12 +24,17 @@ AUTH_LOCK     = "/tmp/authscript.lock"
 INDEX_LOCK    = "/tmp/indexscript.lock"
 BOTH_LOCK     = "/tmp/runboth.lock"
 
-# run-both timer
+# timers (current layout)
+RUNFAST_UNIT  = "runfast.timer"      # Block-Watcher → Match-Checker → Auth-Looper
+RUNSLOW_UNIT  = "runslow.timer"      # Index-Looper (inscriptions)
+TIMER_UNITS   = {"runfast": RUNFAST_UNIT, "runslow": RUNSLOW_UNIT}
+
+# legacy “runboth” timer (still exposed for older UI bits)
 TIMER_UNIT    = "runboth.timer"
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
 
-# block-watcher timer
+# block-watcher ones
 WATCHER_UNIT  = "blockWatcher.timer"
 LAST_FILE     = BASE_DIR / "scripts" / "state" / "last_height.txt"
 
@@ -42,9 +49,9 @@ table = boto3.resource("dynamodb", region_name=DYNAMO_REGION).Table(TABLE_NAME)
 
 # ───────────── helpers ───────────────
 def _running(lock: str) -> bool:
+    """Check PID file; prune if stale"""
     p = Path(lock)
-    if not p.exists():
-        return False
+    if not p.exists(): return False
     try:
         pid = int(p.read_text())
         proc = Path(f"/proc/{pid}")
@@ -70,6 +77,36 @@ def _spawn(script: Path, lock: str, env_var: str):
 def _sd(*args):
     subprocess.run([SUDO_PATH, "systemctl", *args], check=True)
 
+def _timer_status(unit: str) -> dict[str, str | bool | None]:
+    """
+    Query a systemd .timer unit and return
+        enabled : bool
+        lastRun : ISO-8601 str | None
+        nextRun : ISO-8601 str | None
+    """
+    raw = subprocess.check_output(
+        [SUDO_PATH, "systemctl", "show", unit,
+         "--property=State,LastTriggerUSec,NextElapseUSec", "--no-page"],
+        text=True
+    )
+    kv = dict(line.split("=", 1) for line in raw.strip().splitlines())
+
+    def to_iso(val: str) -> str | None:
+        # Example val: 'Mon 2025-04-26 19:41:24 UTC'
+        if val == "n/a":
+            return None
+        return (
+            datetime.strptime(val, "%a %Y-%m-%d %H:%M:%S %Z")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+        )
+
+    return {
+        "enabled": kv["State"] in {"waiting", "running"},
+        "lastRun": to_iso(kv["LastTriggerUSec"]),
+        "nextRun": to_iso(kv["NextElapseUSec"]),
+    }
+
 # ───────────── one-shot script routes ─────────────
 @app.get("/api/ping")
 def ping():
@@ -93,7 +130,14 @@ def run_index():
 def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
-# ───────────── run-both timer endpoints ──────────
+# ───────────── generic timer status (NEW) ─────────
+@app.get("/api/timer/<timer>/status")
+def timer_status(timer: str):
+    if timer not in TIMER_UNITS:
+        abort(404, description="unknown timer")
+    return _timer_status(TIMER_UNITS[timer])
+
+# ───────────── legacy run-both timer endpoints ────
 @app.get("/api/schedule/status")
 def schedule_status():
     out = subprocess.run([SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
