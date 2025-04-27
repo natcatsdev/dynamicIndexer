@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.7  (list-timers −l ⇒ nextRun for all timers)
+# DynamicIndexer API – v0.9.8  (nextRun even when UTC is elided)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -79,8 +79,8 @@ def _sd(*args):
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
-    Return {enabled, lastRun, nextRun}.  Falls back to `list-timers -l`
-    so long unit names never lose the UTC token.
+    Return {enabled, lastRun, nextRun}.  Falls back to `list-timers -l` and
+    handles rows that omit UTC by joining the first 4 tokens.
     """
     try:
         raw = subprocess.check_output(
@@ -145,8 +145,10 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
             if row:
                 parts = row.split()
                 if "UTC" in parts:
-                    ts_str = " ".join(parts[: parts.index("UTC") + 1])
-                    next_iso = _parse(ts_str)
+                    ts_str = " ".join(parts[: parts.index("UTC") + 1])  # Sun … UTC
+                else:  # UTC missing (truncated rows) → first 4 tokens
+                    ts_str = " ".join(parts[:4])                        # Sun … HH:MM:SS
+                next_iso = _parse(ts_str)
         except Exception:
             pass
 
