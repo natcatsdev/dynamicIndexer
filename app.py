@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.4  (next-run works on AL2023)
+# DynamicIndexer API – v0.9.5  (next-run via list-timers fallback)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ RUNFAST_UNIT  = "runfast.timer"
 RUNSLOW_UNIT  = "runslow.timer"
 TIMER_UNITS   = {"runfast": RUNFAST_UNIT, "runslow": RUNSLOW_UNIT}
 
-TIMER_UNIT    = "runboth.timer"                # legacy
+TIMER_UNIT    = "runboth.timer"                 # legacy
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
 
@@ -78,7 +78,10 @@ def _sd(*args):
 
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
-    """Return {enabled,lastRun,nextRun} safely."""
+    """
+    Return {enabled, lastRun, nextRun} safely.
+    Falls back to parsing `systemctl list-timers` if NextElapse keys are empty.
+    """
     try:
         raw = subprocess.check_output(
             [
@@ -97,13 +100,13 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     except Exception as e:
         return {"enabled": False, "lastRun": None, "nextRun": None, "error": str(e)}
 
-    def parse(val: str | None) -> str | None:
-        if not val or val == "n/a":
+    def _parse(ts: str | None) -> str | None:
+        if not ts or ts == "n/a":
             return None
-        if val.isdigit():
+        if ts.isdigit():                     # epoch-microseconds
             try:
                 return (
-                    datetime.utcfromtimestamp(int(val) / 1_000_000)
+                    datetime.utcfromtimestamp(int(ts) / 1_000_000)
                     .replace(tzinfo=timezone.utc)
                     .isoformat()
                 )
@@ -117,7 +120,7 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
         ):
             try:
                 return (
-                    datetime.strptime(val, fmt)
+                    datetime.strptime(ts, fmt)
                     .replace(tzinfo=timezone.utc)
                     .isoformat()
                 )
@@ -125,18 +128,30 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
                 continue
         return None
 
-    next_raw = (
+    # primary keys
+    last_iso = _parse(kv.get("LastTriggerUSec"))
+    next_iso = _parse(
         kv.get("NextElapseUSec")
         or kv.get("NextElapseUSecRealtime")
         or kv.get("NextElapseUSecMonotonic")
     )
 
-    return {
-        "enabled": kv.get("ActiveState") == "active"
-                   or kv.get("State") in {"waiting", "running"},
-        "lastRun": parse(kv.get("LastTriggerUSec")),
-        "nextRun": parse(next_raw),
-    }
+    # fallback via list-timers
+    if next_iso is None:
+        try:
+            row = subprocess.check_output(
+                [SUDO_PATH, "systemctl", "list-timers", "--all", "--no-legend", unit],
+                text=True,
+            ).strip()
+            if row:
+                # first 5 tokens compose the timestamp "Sun 2025-04-27 07:00:28 UTC"
+                next_iso = _parse(" ".join(row.split()[:5]))
+        except Exception:
+            pass
+
+    enabled = kv.get("ActiveState") == "active" or kv.get("State") in {"waiting", "running"}
+
+    return {"enabled": enabled, "lastRun": last_iso, "nextRun": next_iso}
 
 # ───────────── one-shot routes ─────────────
 @app.get("/api/ping")
@@ -246,7 +261,6 @@ def watcher_disable():
 @app.get("/api/watcher/lastht")
 def watcher_last_ht():
     return {"lastHeight": int(LAST_FILE.read_text()) if LAST_FILE.exists() else None}
-
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
