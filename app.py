@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.0  (adds generic timer status)
+# DynamicIndexer API – v0.9.1  (robust timer status)
 # ---------------------------------------------------
 from __future__ import annotations
 
-import os, sys, subprocess, json, re
+import os, sys, subprocess, re
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, jsonify, request, abort
@@ -34,7 +34,7 @@ TIMER_UNIT    = "runboth.timer"
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
 
-# block-watcher ones
+# block-watcher
 WATCHER_UNIT  = "blockWatcher.timer"
 LAST_FILE     = BASE_DIR / "scripts" / "state" / "last_height.txt"
 
@@ -49,9 +49,10 @@ table = boto3.resource("dynamodb", region_name=DYNAMO_REGION).Table(TABLE_NAME)
 
 # ───────────── helpers ───────────────
 def _running(lock: str) -> bool:
-    """Check PID file; prune if stale"""
+    """Check PID file; prune if stale."""
     p = Path(lock)
-    if not p.exists(): return False
+    if not p.exists():
+        return False
     try:
         pid = int(p.read_text())
         proc = Path(f"/proc/{pid}")
@@ -61,6 +62,7 @@ def _running(lock: str) -> bool:
     except Exception:
         p.unlink(missing_ok=True)
         return False
+
 
 def _spawn(script: Path, lock: str, env_var: str):
     if _running(lock):
@@ -74,32 +76,63 @@ def _spawn(script: Path, lock: str, env_var: str):
     Path(lock).write_text(str(proc.pid))
     return jsonify({"status": "started"}), 202
 
+
 def _sd(*args):
     subprocess.run([SUDO_PATH, "systemctl", *args], check=True)
 
+
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
-    Query a systemd .timer unit and return
-        enabled : bool
-        lastRun : ISO-8601 str | None
-        nextRun : ISO-8601 str | None
+    Return {enabled, lastRun, nextRun} for a systemd .timer.
+    Handles:
+      • micro-seconds value (digits only)
+      • "Sun 2025-04-27 05:31:12 UTC"
+      • same line with any TZ abbr (PDT, PST, …)
     """
     raw = subprocess.check_output(
-        [SUDO_PATH, "systemctl", "show", unit,
-         "--property=State,LastTriggerUSec,NextElapseUSec", "--no-page"],
-        text=True
+        [
+            SUDO_PATH,
+            "systemctl",
+            "show",
+            unit,
+            "--property=State,LastTriggerUSec,NextElapseUSec",
+            "--no-page",
+        ],
+        text=True,
     )
     kv = dict(line.split("=", 1) for line in raw.strip().splitlines())
 
     def to_iso(val: str) -> str | None:
-        # Example val: 'Mon 2025-04-26 19:41:24 UTC'
         if val == "n/a":
             return None
-        return (
-            datetime.strptime(val, "%a %Y-%m-%d %H:%M:%S %Z")
-            .replace(tzinfo=timezone.utc)
-            .isoformat()
-        )
+
+        # digits? → micro-seconds since epoch
+        if val.isdigit():
+            return (
+                datetime.utcfromtimestamp(int(val) / 1_000_000)
+                .replace(tzinfo=timezone.utc)
+                .isoformat()
+            )
+
+        # try with explicit TZ (UTC)
+        try:
+            return (
+                datetime.strptime(val, "%a %Y-%m-%d %H:%M:%S %Z")
+                .astimezone(timezone.utc)
+                .isoformat()
+            )
+        except ValueError:
+            pass
+
+        # drop trailing TZ token
+        try:
+            return (
+                datetime.strptime(" ".join(val.split()[:-1]), "%a %Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=timezone.utc)
+                .isoformat()
+            )
+        except ValueError:
+            return None  # graceful fallback
 
     return {
         "enabled": kv["State"] in {"waiting", "running"},
@@ -107,10 +140,12 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
         "nextRun": to_iso(kv["NextElapseUSec"]),
     }
 
+
 # ───────────── one-shot script routes ─────────────
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
+
 
 @app.get("/api/block-data")
 def block_data():
@@ -118,17 +153,21 @@ def block_data():
     items.sort(key=lambda x: int(x.get("block_number", 0)))
     return jsonify(items)
 
+
 @app.post("/api/run-authscript")
 def run_auth():
     return _spawn(AUTH_SCRIPT, AUTH_LOCK, "AUTH_LOCK_FILE")
+
 
 @app.post("/api/run-inscriptionscript")
 def run_index():
     return _spawn(INDEX_SCRIPT, INDEX_LOCK, "INDEX_LOCK_FILE")
 
+
 @app.post("/api/run-both")
 def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
+
 
 # ───────────── generic timer status (NEW) ─────────
 @app.get("/api/timer/<timer>/status")
@@ -137,18 +176,24 @@ def timer_status(timer: str):
         abort(404, description="unknown timer")
     return _timer_status(TIMER_UNITS[timer])
 
+
 # ───────────── legacy run-both timer endpoints ────
 @app.get("/api/schedule/status")
 def schedule_status():
-    out = subprocess.run([SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
-                         capture_output=True, text=True)
+    out = subprocess.run(
+        [SUDO_PATH, "systemctl", "is-active", TIMER_UNIT],
+        capture_output=True,
+        text=True,
+    )
     return {"enabled": out.stdout.strip() == "active"}
+
 
 @app.get("/api/schedule/cadence")
 def schedule_cadence_get():
     txt = TIMER_FILE.read_text()
-    m   = SEC_RE.search(txt)
+    m = SEC_RE.search(txt)
     return {"seconds": int(m.group(1)) if m else None}
+
 
 @app.post("/api/schedule/cadence")
 def schedule_cadence_set():
@@ -156,38 +201,56 @@ def schedule_cadence_set():
     if not 60 <= seconds <= 86_400:
         return {"error": "Seconds must be 60–86400"}, 400
     txt = TIMER_FILE.read_text()
-    txt = SEC_RE.sub(f"OnUnitActiveSec={seconds}s", txt) if SEC_RE.search(txt) \
-          else txt + f"\nOnUnitActiveSec={seconds}s\n"
+    txt = (
+        SEC_RE.sub(f"OnUnitActiveSec={seconds}s", txt)
+        if SEC_RE.search(txt)
+        else txt + f"\nOnUnitActiveSec={seconds}s\n"
+    )
     TIMER_FILE.write_text(txt)
-    _sd("daemon-reload"); _sd("restart", TIMER_UNIT)
+    _sd("daemon-reload")
+    _sd("restart", TIMER_UNIT)
     return {"seconds": seconds}, 202
+
 
 @app.post("/api/schedule/enable")
 def schedule_enable():
-    _sd("start", TIMER_UNIT); return {"enabled": True}
+    _sd("start", TIMER_UNIT)
+    return {"enabled": True}
+
 
 @app.post("/api/schedule/disable")
 def schedule_disable():
-    _sd("stop", TIMER_UNIT);  return {"enabled": False}
+    _sd("stop", TIMER_UNIT)
+    return {"enabled": False}
+
 
 # ───────────── Block-Watcher endpoints ───────────
 @app.get("/api/watcher/status")
 def watcher_status():
-    out = subprocess.run([SUDO_PATH, "systemctl", "is-active", WATCHER_UNIT],
-                         capture_output=True, text=True)
+    out = subprocess.run(
+        [SUDO_PATH, "systemctl", "is-active", WATCHER_UNIT],
+        capture_output=True,
+        text=True,
+    )
     return {"running": out.stdout.strip() == "active"}
+
 
 @app.post("/api/watcher/enable")
 def watcher_enable():
-    _sd("start", WATCHER_UNIT); return {"running": True}
+    _sd("start", WATCHER_UNIT)
+    return {"running": True}
+
 
 @app.post("/api/watcher/disable")
 def watcher_disable():
-    _sd("stop", WATCHER_UNIT);  return {"running": False}
+    _sd("stop", WATCHER_UNIT)
+    return {"running": False}
+
 
 @app.get("/api/watcher/lastht")
 def watcher_last_ht():
     return {"lastHeight": int(LAST_FILE.read_text()) if LAST_FILE.exists() else None}
+
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
