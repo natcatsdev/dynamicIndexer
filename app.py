@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os, sys, subprocess, re, json                     # ← json for export
+from inscription_utils import build_payload, DELEGATE_ID
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, jsonify, request, abort, Response
@@ -267,6 +268,50 @@ def watcher_last_ht():
     return {"lastHeight": int(LAST_FILE.read_text()) if LAST_FILE.exists() else None}
 
 # ───────────── export index (NEW) ───────────────
+
+
+# ───────────── authorised-parent lookup (NEW) ─────────────
+@app.get("/api/parent/<int:block>")
+def get_parent(block: int):
+    """
+    Return {"parent": <inscriptionID>} for the authorised parent of *block*,
+    or {"parent": null} if not yet available.
+
+    Logic:
+      • Row A  = item where block_number == <block>
+      • auth   = Row A["authParent"]             (may be absent)
+      • Row B  = item where block_number == auth
+      • iid    = Row B["inscriptionID"]          (must be >64 chars)
+    """
+    try:
+        rowA = table.get_item(Key={"block_number": block}).get("Item")
+        auth = rowA and rowA.get("authParent")
+        if not auth:
+            return {"parent": None}
+
+        rowB = table.get_item(Key={"block_number": int(auth)}).get("Item")
+        iid  = rowB and rowB.get("inscriptionID")
+        if iid and len(iid) > 64:
+            return {"parent": iid}
+        return {"parent": None}
+    except Exception as e:
+        abort(500, f"lookup failed: {e}")
+
+
+# ───────────── build-payload preview (NEW) ─────────────
+@app.get("/api/payload/<int:block>")
+def payload_preview(block: int):
+    """
+    Return JSON payload + delegate for front-end preview / wallet download.
+      {
+        "payload": {…},       # the on-chain JSON
+        "delegate": "6647…ef7i0"
+      }
+    """
+    return jsonify({
+        "payload":  build_payload(block),
+        "delegate": DELEGATE_ID
+    })
 @app.get("/api/export/index.json")
 def export_index():
     """
