@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.1  (robust timer status)
+# DynamicIndexer API – v0.9.2  (defensive timer status)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ BOTH_LOCK     = "/tmp/runboth.lock"
 
 # timers (current layout)
 RUNFAST_UNIT  = "runfast.timer"      # Block-Watcher → Match-Checker → Auth-Looper
-RUNSLOW_UNIT  = "runslow.timer"      # Index-Looper (inscriptions)
+RUNSLOW_UNIT  = "runslow.timer"      # Index-Looper
 TIMER_UNITS   = {"runfast": RUNFAST_UNIT, "runslow": RUNSLOW_UNIT}
 
-# legacy “runboth” timer (still exposed for older UI bits)
+# legacy “runboth” timer (older UI)
 TIMER_UNIT    = "runboth.timer"
 TIMER_FILE    = BASE_DIR / "systemd" / "runboth.timer"
 SEC_RE        = re.compile(r"^OnUnitActiveSec=(\d+)s$", re.M)
@@ -83,61 +83,63 @@ def _sd(*args):
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
-    Return {enabled, lastRun, nextRun} for a systemd .timer.
-    Handles:
-      • micro-seconds value (digits only)
-      • "Sun 2025-04-27 05:31:12 UTC"
-      • same line with any TZ abbr (PDT, PST, …)
+    Safe report of a systemd .timer unit.
+    Always returns keys: enabled, lastRun, nextRun (ISO-8601 or None).
+    Never raises.
     """
-    raw = subprocess.check_output(
-        [
-            SUDO_PATH,
-            "systemctl",
-            "show",
-            unit,
-            "--property=State,LastTriggerUSec,NextElapseUSec",
-            "--no-page",
-        ],
-        text=True,
-    )
-    kv = dict(line.split("=", 1) for line in raw.strip().splitlines())
+    try:
+        raw = subprocess.check_output(
+            [
+                SUDO_PATH,
+                "systemctl",
+                "show",
+                unit,
+                "--property=State,LastTriggerUSec,NextElapseUSec",
+                "--no-page",
+            ],
+            text=True,
+        )
+        kv = dict(line.split("=", 1) for line in raw.strip().splitlines())
+    except Exception as e:
+        # systemctl failed
+        return {"enabled": False, "lastRun": None, "nextRun": None, "error": str(e)}
 
-    def to_iso(val: str) -> str | None:
-        if val == "n/a":
+    def parse(val: str | None) -> str | None:
+        if not val or val == "n/a":
             return None
 
-        # digits? → micro-seconds since epoch
+        # digits → micros since epoch
         if val.isdigit():
-            return (
-                datetime.utcfromtimestamp(int(val) / 1_000_000)
-                .replace(tzinfo=timezone.utc)
-                .isoformat()
-            )
+            try:
+                return (
+                    datetime.utcfromtimestamp(int(val) / 1_000_000)
+                    .replace(tzinfo=timezone.utc)
+                    .isoformat()
+                )
+            except Exception:
+                return None
 
-        # try with explicit TZ (UTC)
-        try:
-            return (
-                datetime.strptime(val, "%a %Y-%m-%d %H:%M:%S %Z")
-                .astimezone(timezone.utc)
-                .isoformat()
-            )
-        except ValueError:
-            pass
-
-        # drop trailing TZ token
-        try:
-            return (
-                datetime.strptime(" ".join(val.split()[:-1]), "%a %Y-%m-%d %H:%M:%S")
-                .replace(tzinfo=timezone.utc)
-                .isoformat()
-            )
-        except ValueError:
-            return None  # graceful fallback
+        # try a few formats
+        for fmt in (
+            "%a %Y-%m-%d %H:%M:%S %Z",
+            "%a %Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S %Z",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                return (
+                    datetime.strptime(val, fmt)
+                    .replace(tzinfo=timezone.utc)
+                    .isoformat()
+                )
+            except ValueError:
+                continue
+        return None  # couldn’t parse
 
     return {
-        "enabled": kv["State"] in {"waiting", "running"},
-        "lastRun": to_iso(kv["LastTriggerUSec"]),
-        "nextRun": to_iso(kv["NextElapseUSec"]),
+        "enabled": kv.get("State") in {"waiting", "running"},
+        "lastRun": parse(kv.get("LastTriggerUSec")),
+        "nextRun": parse(kv.get("NextElapseUSec")),
     }
 
 
@@ -169,7 +171,7 @@ def run_both():
     return _spawn(BOTH_SCRIPT, BOTH_LOCK, "RUN_BOTH_LOCK_FILE")
 
 
-# ───────────── generic timer status (NEW) ─────────
+# ───────────── generic timer status ───────────────
 @app.get("/api/timer/<timer>/status")
 def timer_status(timer: str):
     if timer not in TIMER_UNITS:
