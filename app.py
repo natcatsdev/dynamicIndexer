@@ -271,29 +271,38 @@ def watcher_last_ht():
 
 
 # ───────────── authorised-parent lookup (NEW) ─────────────
+# ───────────── authorised-parent lookup (UPDATED) ─────────────
 @app.get("/api/parent/<int:block>")
 def get_parent(block: int):
     """
-    Return {"parent": <inscriptionID>} for the authorised parent of *block*,
-    or {"parent": null} if not yet available.
+    Return:
+      {
+        "parent"   : <inscriptionID> | None,
+        "authBlock": <authorised-parent block height> | None
+      }
 
-    Logic:
+    Steps
       • Row A  = item where block_number == <block>
-      • auth   = Row A["authParent"]             (may be absent)
+      • auth   = Row A["authParent"]       (absent → no parent yet)
       • Row B  = item where block_number == auth
-      • iid    = Row B["inscriptionID"]          (must be >64 chars)
+      • iid    = Row B["inscriptionID"]    (must be >64 chars to count)
     """
     try:
         rowA = table.get_item(Key={"block_number": block}).get("Item")
         auth = rowA and rowA.get("authParent")
+
         if not auth:
-            return {"parent": None}
+            return {"parent": None, "authBlock": None}
 
         rowB = table.get_item(Key={"block_number": int(auth)}).get("Item")
         iid  = rowB and rowB.get("inscriptionID")
+
         if iid and len(iid) > 64:
-            return {"parent": iid}
-        return {"parent": None}
+            return {"parent": iid, "authBlock": int(auth)}
+
+        # parent block known but inscription not yet available
+        return {"parent": None, "authBlock": int(auth)}
+
     except Exception as e:
         abort(500, f"lookup failed: {e}")
 
