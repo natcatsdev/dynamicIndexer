@@ -1,0 +1,11 @@
+# indexLooper.service
+[Unit]
+Description=Run inscription indexer (writes lastIndexedAt)
+
+[Service]
+Type=oneshot
+User=ec2-user
+WorkingDirectory=/home/ec2-user/dynamicIndexer
+Environment="PATH=/home/ec2-user/dynamicIndexer/.venv/bin"
+ExecStart=/home/ec2-user/dynamicIndexer/.venv/bin/python scripts/indexLooper.py
+SuccessExitStatus=0

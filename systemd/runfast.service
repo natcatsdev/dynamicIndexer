@@ -1,0 +1,6 @@
+[Unit]
+Description=Start fast pipeline (watcher → checker → auth)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start authLooperBackend.service

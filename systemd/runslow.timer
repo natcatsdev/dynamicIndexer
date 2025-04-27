@@ -1,0 +1,11 @@
+# runslow.timer  (e.g. every 30 min)
+[Unit]
+Description=Slow inscription indexer timer
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=1800s     
+Persistent=true
+
+[Install]
+WantedBy=timers.target

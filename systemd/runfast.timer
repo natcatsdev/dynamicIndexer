@@ -1,0 +1,10 @@
+[Unit]
+Description=Fast pipeline timer (120-s cadence)
+
+[Timer]
+OnBootSec=1m
+OnUnitActiveSec=120s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
