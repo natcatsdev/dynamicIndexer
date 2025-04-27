@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------
-# DynamicIndexer API – v0.9.6  (nextRun fully working)
+# DynamicIndexer API – v0.9.7  (list-timers −l ⇒ nextRun for all timers)
 # ---------------------------------------------------
 from __future__ import annotations
 
@@ -79,8 +79,8 @@ def _sd(*args):
 
 def _timer_status(unit: str) -> dict[str, str | bool | None]:
     """
-    Return {enabled, lastRun, nextRun}.  Falls back to parsing
-    `systemctl list-timers` when NextElapse keys are empty.
+    Return {enabled, lastRun, nextRun}.  Falls back to `list-timers -l`
+    so long unit names never lose the UTC token.
     """
     try:
         raw = subprocess.check_output(
@@ -103,7 +103,7 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     def _parse(ts: str | None) -> str | None:
         if not ts or ts == "n/a":
             return None
-        if ts.isdigit():  # epoch-micros
+        if ts.isdigit():  # epoch-microseconds
             try:
                 return (
                     datetime.utcfromtimestamp(int(ts) / 1_000_000)
@@ -135,17 +135,17 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
         or kv.get("NextElapseUSecMonotonic")
     )
 
-    # fallback: list-timers
+    # fallback: list-timers -l
     if next_iso is None:
         try:
             row = subprocess.check_output(
-                [SUDO_PATH, "systemctl", "list-timers", "--all", "--no-legend", unit],
+                [SUDO_PATH, "systemctl", "list-timers", "--all", "-l", "--no-legend", unit],
                 text=True,
             ).strip()
             if row:
                 parts = row.split()
                 if "UTC" in parts:
-                    ts_str = " ".join(parts[: parts.index("UTC") + 1])  # Sun … UTC
+                    ts_str = " ".join(parts[: parts.index("UTC") + 1])
                     next_iso = _parse(ts_str)
         except Exception:
             pass
@@ -236,7 +236,7 @@ def schedule_disable():
     return {"enabled": False}
 
 
-# ───────────── Block-Watcher endpoints ──────
+# ───────────── Block-Watcher endpoints ─────
 @app.get("/api/watcher/status")
 def watcher_status():
     out = subprocess.run(
