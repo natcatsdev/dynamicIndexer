@@ -40,31 +40,37 @@ def fetch_block_mined_iso(h: int) -> str | None:
 
 def fetch_al_for_block(h: int) -> tuple[str, str]:
     """
-    Call ordinals.com “AL” widget → (block_str, authorised_parent|ERROR)
+    Call ordinals.com “AL” widget → (block_str, authorised_parent or "")
+    If any error occurs, return an empty string so the row is retried next run.
     """
     url = ("https://ordinals.com/inscription/"
            "66475024139f5a7500b48ac688a7418fdf5838a7eabbc7e6792b7dc7829c8ef7i0")
+
     with sync_playwright() as p:
         page = p.chromium.launch(headless=True).new_page()
         try:
             page.goto(url); page.wait_for_load_state("networkidle")
             frame = next((f for f in page.frames if "/preview/" in f.url), None)
             if not frame:
-                return str(h), "NO_IFRAME"
+                log.warning("block %s: iframe not found", h)
+                return str(h), ""                       # retry later
+
             frame.fill("#blockAL", str(h)); frame.click("#alButton")
             time.sleep(2)
             txt = frame.inner_text("#alOutput").strip()
-        except Exception:
-            return str(h), "PAGE_LOAD_ERROR"
+        except Exception as e:
+            log.error("page load error for block %s: %s", h, e)
+            return str(h), ""                           # retry later
 
     try:
         data = json.loads(txt)
-        return str(data.get("block", h)), str(data.get("authorizedParent","invalid"))
-    except Exception:
-        log.error("JSON parse error for block %s", h)
-        return str(h), "PARSE_ERROR"
+        return str(data.get("block", h)), str(data.get("authorizedParent", "")).strip()
+    except Exception as e:
+        log.error("JSON parse error for block %s: %s", h, e)
+        return str(h), ""                               # retry later
 
 # ───────────── main loop ───────────────────────────────────────────────
+# retained for backward compatibility; script no longer emits these
 ERROR_TOKENS = {
     "PARSE_ERROR", "PAGE_LOAD_ERROR", "NO_IFRAME",
     "UI_ERROR", "NO_FALLBACK_UI", "TIMEOUT", "ERROR"
@@ -92,11 +98,10 @@ def main() -> None:
 
         # ---- 2. resolve parent ---------------------------------------
         blk_str, parent = fetch_al_for_block(int(blk))
-        log.info("Result: authParent=%s", parent)
+        log.info("Result: authParent=%s", parent or "<empty>")
 
-        # ---- 2a. if error token → skip setting authParent ------------
-        if parent in ERROR_TOKENS or parent.lower() in {"", "none"}:
-            log.warning("temporary error (%s); will retry next run", parent)
+        # ---- 2a. if empty → skip setting authParent ------------------
+        if not parent or parent in ERROR_TOKENS:
             table.update_item(
                 Key={"block_number": int(blk_str)},
                 UpdateExpression="SET lastProcessedAt = :t",
