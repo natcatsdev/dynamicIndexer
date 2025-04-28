@@ -11,6 +11,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, abort, Response
 from flask_cors import CORS
 import boto3
+import requests, functools
 from boto3.dynamodb.conditions import Attr               # ← new import
 
 # ───────────── constants ─────────────
@@ -307,6 +308,35 @@ def get_parent(block: int):
         abort(500, f"lookup failed: {e}")
 
 
+
+# ───────── inscription owner lookup (NEW) ───────────────────
+@functools.lru_cache(maxsize=1024)
+def _owner_cached(iid: str):
+    """
+    One-minute cache so repeated look-ups don’t hit Hiro every time.
+    Returns a bech32 address string or None.
+    """
+    url  = f"https://api.hiro.so/ordinals/v1/inscriptions/{iid}"
+    data = requests.get(url, timeout=15).json()
+    # Hiro returns either 'address' or 'owner' depending on transfer history
+    return data.get("address") or data.get("owner")
+
+
+@app.get("/api/inscription/<path:iid>/owner")
+def inscription_owner(iid: str):
+    """
+    → 200  {"owner": "bc1p…"}     when found
+    → 404  when Hiro has no record yet
+    → 502  on network / API error
+    """
+    try:
+        owner = _owner_cached(iid)
+        if not owner:
+            abort(404, "Owner not found")
+        return {"owner": owner}
+    except Exception as e:
+        abort(502, f"Lookup failed: {e}")
+# ────────────────────────────────────────────────────────────
 # ───────────── build-payload preview (NEW) ─────────────
 @app.get("/api/payload/<int:block>")
 def payload_preview(block: int):
