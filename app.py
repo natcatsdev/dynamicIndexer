@@ -11,6 +11,8 @@ from pathlib import Path
 from flask import Flask, jsonify, request, abort, Response
 from flask_cors import CORS
 import boto3
+from inscription_utils import build_payload, DELEGATE_ID
+from decimal import Decimal
 import requests, functools
 from boto3.dynamodb.conditions import Attr               # ← new import
 
@@ -392,6 +394,52 @@ def export_index():
     resp = Response(json.dumps(out), mimetype="application/json")
     resp.headers["Content-Disposition"] = "attachment; filename=index.json"
     return resp
+
+# ───────── bulk-queue endpoints ─────────
+BULK_TABLE = boto3.resource("dynamodb", region_name=DYNAMO_REGION)\
+                  .Table("bulkInscribeQueue1")
+
+@app.post("/api/bulk/enqueue")
+def bulk_enqueue():
+    """
+    Body: { blocks:[830500,830501,…] }
+    Ignores duplicates, returns { added: n }.
+    """
+    blocks = (request.get_json(force=True) or {}).get("blocks", [])
+    added  = 0
+    for b in blocks:
+        try:
+            BULK_TABLE.put_item(
+                Item={
+                    "block_number": Decimal(str(b)),
+                    "payload": json.dumps(build_payload(b)),
+                    "delegate": DELEGATE_ID,
+                    "status": "pending",
+                    "created": datetime.utcnow().isoformat() + "Z"
+                },
+                ConditionExpression="attribute_not_exists(block_number)"
+            )
+            added += 1
+        except boto3.client("dynamodb").exceptions.ConditionalCheckFailedException:
+            pass   # duplicate
+    return {"added": added}
+
+@app.get("/api/bulk/list")
+def bulk_list():
+    scan = BULK_TABLE.scan()
+    return scan.get("Items", [])
+
+@app.post("/api/bulk/clear")
+def bulk_clear():
+    """
+    Body: { status:["done","error"] }  – deletes rows with those statuses.
+    """
+    sts = set((request.get_json(force=True) or {}).get("status", []))
+    scan = BULK_TABLE.scan(FilterExpression=Attr("status").is_in(sts))
+    for it in scan.get("Items", []):
+        BULK_TABLE.delete_item(Key={"block_number": it["block_number"]})
+    return {"deleted": len(scan.get("Items", []))}
+
 
 # ───────────── dev entrypoint ─────────────
 if __name__ == "__main__":
