@@ -19,7 +19,7 @@ from boto3.dynamodb.conditions import Attr
 
 # ───────────── constants ─────────────
 
-NODE_BASE = "http://10.0.2.37:5000"
+NODE_BASE = "http://172.31.19.167:5000" 
 DYNAMO_REGION = "us-east-1"
 TABLE_NAME    = "dynamicIndex1"
 
