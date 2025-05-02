@@ -14,9 +14,12 @@ import boto3
 from inscription_utils import build_payload, DELEGATE_ID
 from decimal import Decimal
 import requests, functools
-from boto3.dynamodb.conditions import Attr               # ← new import
+from boto3.dynamodb.conditions import Attr
+# ← new import
 
 # ───────────── constants ─────────────
+
+NODE_BASE = "http://10.0.2.37:5000"
 DYNAMO_REGION = "us-east-1"
 TABLE_NAME    = "dynamicIndex1"
 
@@ -162,6 +165,28 @@ def _timer_status(unit: str) -> dict[str, str | bool | None]:
     return {"enabled": enabled, "lastRun": last_iso, "nextRun": next_iso}
 
 # ───────────── one-shot routes ─────────────
+
+
+
+#bitcoin node api
+@app.get("/api/node-status")
+def node_status():
+    try:
+        return requests.get(f"{NODE_BASE}/status", timeout=5).json()
+    except Exception as e:
+        return {"error": f"node unreachable – {e}"}, 502
+
+@app.post("/api/inscribe")
+def api_inscribe_proxy():
+    resp = requests.post(
+        f"{NODE_BASE}/inscribe",
+        json=request.get_json(force=True),
+        timeout=60
+    )
+    return resp.json(), resp.status_code
+
+#indexer api
+
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
