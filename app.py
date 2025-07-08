@@ -62,10 +62,19 @@ dynamo        = boto3.resource("dynamodb", region_name=REGION)
 index_table   = dynamo.Table(INDEX_TABLE)
 blocks_table  = dynamo.Table(BLOCKS_TABLE)
 
-# ─── helpers ────────────────────────────────────────
+
+# ── helpers ─────────────────────────────────────────
 def _broadcast(block: int, payload: dict):
-    """Send diff to all WS clients."""
-    socketio.emit("block_update", {"block": block, **payload})
+    """
+    Emit a JSON-safe diff to every connected Web-Socket client.
+    Any Decimal values coming from DynamoDB are coerced to int so
+    socketio.emit() never trips over “Decimal is not JSON serializable”.
+    """
+    def _clean(v):
+        return int(v) if isinstance(v, Decimal) else v
+
+    safe_payload = {k: _clean(v) for k, v in payload.items()}
+    socketio.emit("block_update", {"block": int(block), **safe_payload})
 
 def _running(lock: str) -> bool:
     """Is the helper script already running?"""
@@ -164,6 +173,26 @@ def all_blocks():
     items.sort(key=lambda x: int(x["block"]))
     return jsonify(items)
 
+@app.get("/api/blocks/<int:block>")
+def get_block(block: int):
+    """
+    Return a single block record so /broadcast/package can
+    verify the reservation still belongs to the caller.
+    """
+    now = _now_ms()
+    _release_expired_holds(now)                # keep timers honest
+
+    rec = blocks_table.get_item(Key={"block": block}).get("Item")
+    if not rec:                                # nonexistent block → 404
+        abort(404, "block not found")
+
+    # DynamoDB numbers arrive as Decimal → coerce to int for JSON
+    clean = {
+        k: int(v) if isinstance(v, Decimal) else v
+        for k, v in rec.items()
+    }
+    return jsonify(clean), 200
+
 # ─── reservation endpoints ──────────────────────────
 @app.post("/api/blocks/<int:block>/mint")
 def reserve_block(block: int):
@@ -220,18 +249,29 @@ def reserve_block(block: int):
             abort(400, "Block not available")
         return {"reserved_until": expires}, 200
 
-    # legacy indefinite hold (no signature)
+    # ── legacy indefinite hold (enableSig false) ───────────
     existing = blocks_table.get_item(Key={"block": block}).get("Item", {})
     if existing.get("status") not in (None, "available"):
         abort(400, "Block not available")
 
     blocks_table.update_item(
         Key={"block": block},
-        UpdateExpression="SET #s=:r, added_at=:at",
+        UpdateExpression="""
+            SET #s=:r,
+                reserved_by=:wb,
+                added_at=:at
+        """,
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":r": "reserved", ":at": Decimal(now)},
+        ExpressionAttributeValues={
+            ":r" : "reserved",
+            ":wb": wallet,
+            ":at": Decimal(now),
+        },
     )
-    _broadcast(block, {"status": "reserved", "reserved_by": wallet})
+    _broadcast(block, {
+        "status": "reserved",
+        "reserved_by": wallet,
+    })
     return "", 204
 
 @app.delete("/api/blocks/<int:block>/mint")
@@ -254,6 +294,51 @@ def release_block(block: int):
     except blocks_table.meta.client.exceptions.ConditionalCheckFailedException:
         abort(409, "reservation not held by this wallet")
     return "", 204
+
+# ─── status patch (minted / complete etc.) ─────────────────────────
+@app.patch("/api/blocks/<int:block>/status")
+def update_status(block: int):
+    """
+    Body: { "status": "<new-status>", "inscription_id": "<id (optional)>" }
+    Allowed status values: "minted", "complete", "reserved", "available".
+    "complete" is normalised → "minted".
+    """
+    body        = request.get_json(force=True) or {}
+    new_status  = body.get("status")
+    insc_id     = body.get("inscription_id")
+
+    if new_status not in ("minted", "complete", "reserved", "available"):
+        abort(400, "bad status")
+
+    if new_status == "complete":
+        new_status = "minted"
+
+    expr_names  = {"#s": "status"}
+    expr_values = {
+        ":ns": new_status,
+        ":at": Decimal(_now_ms()),
+    }
+    update_expr = "SET #s = :ns, added_at = :at"
+
+    if insc_id:
+        expr_names["#i"] = "inscription_id"
+        expr_values[":iid"] = insc_id
+        update_expr += ", #i = :iid"
+
+    blocks_table.update_item(
+        Key={"block": block},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames=expr_names,
+        ExpressionAttributeValues=expr_values,
+    )
+
+    diff = {"status": new_status}
+    if insc_id:
+        diff["inscription_id"] = insc_id
+    _broadcast(block, diff)
+
+    return "", 204
+
 
 # ─── run ────────────────────────────────────────────
 if __name__ == "__main__":
