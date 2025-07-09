@@ -151,6 +151,28 @@ def _release_expired_holds(now_ms: int):
 def ping():
     return {"status": "ok"}
 
+# ─── push-style “announce-block” endpoint ──────────────────────────────
+@app.post("/api/announce-block")
+def announce_block():
+    """
+    Body: {
+      "block"   : <int>,                     # REQUIRED
+      ...any other fields to merge...
+    }
+    Simply re-emits the payload via Web-Sockets so every connected
+    front-end gets a live diff without polling.
+    """
+    body = request.get_json(force=True) or {}
+    blk  = body.get("block")
+    if blk is None:
+        abort(400, "missing block")
+
+    # Broadcast the diff exactly as it came in
+    _broadcast(int(blk), {k: v for k, v in body.items() if k != "block"})
+    return "", 204
+
+
+
 @app.post("/api/run-authscript")
 def run_auth():
     return _spawn(AUTH_SCRIPT, AUTH_LOCK, "AUTH_LOCK_FILE")
